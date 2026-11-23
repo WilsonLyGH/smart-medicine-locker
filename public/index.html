@@ -1,0 +1,1753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SMART MEDICINE LOCKER — DCS SCADA HMI</title>
+  <meta name="description" content="Smart Medicine Locker DCS SCADA Web HMI" />
+
+  <!-- Fonts: Plus Jakarta Sans, Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <!-- SheetJS (xlsx) via CDN for Excel (.xlsx) Compliance Report Export -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <!-- Clinical Light SCADA HMI Styles -->
+  <link rel="stylesheet" href="./css/hmi.css" />
+</head>
+<body class="text-slate-900 antialiased selection:bg-teal-500/20 selection:text-teal-900">
+
+  <!-- ======================================================================
+       STICKY HEADER + E-STOP BANNER (Shown after Login)
+       ====================================================================== -->
+  <div id="app-chrome" class="hidden sticky top-0 z-30">
+
+    <!-- Emergency Stop Active Hazard Banner -->
+    <div id="estop-banner" class="hidden bg-red-600 border-b border-red-700 text-white px-4 py-2 shadow-md">
+      <div class="max-w-[1600px] mx-auto flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5">
+          <span class="inline-flex h-2.5 w-2.5 rounded-full bg-white animate-ping"></span>
+          <span class="font-mono-tabular font-bold tracking-wider text-xs uppercase">
+            E-STOP ENGAGED — ALL ACTUATORS LOCKED
+          </span>
+        </div>
+        <button
+          id="estop-banner-release-btn"
+          type="button"
+          class="px-3 py-1 rounded-full bg-white text-red-700 hover:bg-red-50 text-xs font-mono-tabular font-bold uppercase tracking-wider shadow-sm transition"
+        >
+          Release E-Stop
+        </button>
+      </div>
+    </div>
+
+    <!-- Global Toast Notification Banner -->
+    <div id="global-toast" class="hidden bg-teal-600 text-white px-4 py-1.5 font-mono-tabular text-xs font-bold tracking-wide text-center shadow-sm"></div>
+
+    <!-- Floating White Navigation Header -->
+    <header class="bg-white/90 backdrop-blur-md border-b border-[#DCEAF0] shadow-sm">
+      <div class="max-w-[1600px] mx-auto px-4 lg:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3">
+
+        <!-- Left: Logo & Brand -->
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-teal-50 to-teal-100/80 border border-teal-200 flex items-center justify-center shadow-sm">
+            <svg class="w-5 h-5 text-teal-600" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="4" y="4" width="20" height="20" rx="5" stroke-opacity="0.45"></rect>
+              <path d="M14 8v12M8 14h12" stroke-width="2.5" stroke-linecap="round"></path>
+              <circle cx="14" cy="5" r="1.5" fill="#0D9488"></circle>
+              <circle cx="23" cy="14" r="1.5" fill="#0D9488"></circle>
+              <circle cx="14" cy="23" r="1.5" fill="#0D9488"></circle>
+              <circle cx="5" cy="14" r="1.5" fill="#0D9488"></circle>
+            </svg>
+          </div>
+          <div>
+            <h1 class="text-base font-extrabold tracking-tight text-slate-900 uppercase leading-none">
+              SMART MEDICINE LOCKER
+            </h1>
+            <p class="text-[11px] font-mono-tabular text-teal-700 font-bold mt-1">
+              DCS SCADA HMI
+            </p>
+          </div>
+        </div>
+
+        <!-- Center: Compact Node & Firebase RTDB Status Pills -->
+        <div class="hidden xl:flex items-center gap-2 bg-[#F3F8FA] border border-[#E2EEF3] rounded-full px-3 py-1 text-xs font-mono-tabular">
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white border border-slate-200/80 text-slate-700 font-semibold">
+            <span id="mini-led-locker_1" class="led-dot led-green"></span>ESP 1
+          </span>
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white border border-slate-200/80 text-slate-700 font-semibold">
+            <span id="mini-led-locker_2" class="led-dot led-green"></span>ESP 2
+          </span>
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white border border-slate-200/80 text-slate-700 font-semibold">
+            <span id="mini-led-locker_3" class="led-dot led-green"></span>ESP 3
+          </span>
+          <span class="text-slate-300">|</span>
+          <span id="rtdb-conn-pill" class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold">
+            <span id="rtdb-conn-led" class="led-dot led-green"></span>
+            <span id="rtdb-conn-text">Firebase: Synced</span>
+          </span>
+        </div>
+
+        <!-- Right: Alarm Pill, E-STOP, User Profile & Logout -->
+        <div class="flex flex-wrap items-center gap-2">
+
+          <div id="header-alarm-pill" class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 font-mono-tabular text-xs">
+            <span id="header-alarm-led" class="led-dot led-green"></span>
+            <span id="header-alarm-text" class="font-bold text-emerald-700">NORMAL</span>
+          </div>
+
+          <button
+            id="btn-estop"
+            type="button"
+            class="estop-btn px-3 py-1 rounded-full font-mono-tabular font-bold text-xs tracking-wider uppercase flex items-center gap-1.5 shadow-sm"
+          >
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4">
+              <polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"></polygon>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <span id="btn-estop-label">E-STOP</span>
+          </button>
+
+          <div class="flex items-center gap-2 bg-[#F3F8FA] border border-[#E2EEF3] rounded-full pl-3 pr-1.5 py-1">
+            <div class="text-right">
+              <div class="flex items-center gap-1.5">
+                <p id="header-user-name" class="text-xs font-bold text-slate-800 leading-none">--</p>
+                <span id="header-user-role" class="px-1.5 py-0.5 rounded-full text-[9px] font-mono-tabular font-bold uppercase bg-teal-100 text-teal-800 border border-teal-300">
+                  ROLE
+                </span>
+              </div>
+              <div class="flex items-center justify-end gap-1 text-[10px] font-mono-tabular text-slate-500 mt-0.5">
+                <span id="header-user-uid">UID</span>
+                <span>•</span>
+                <span id="hmi-clock" class="text-teal-700 font-semibold">--:--:--</span>
+              </div>
+            </div>
+            <button
+              id="btn-logout"
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-white hover:bg-red-50 border border-slate-200 hover:border-red-300 text-[11px] font-mono-tabular font-semibold text-slate-600 hover:text-red-700 transition"
+            >
+              Logout
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Sub-Navigation Pill Bar -->
+      <div class="bg-[#F7FBFD] border-t border-[#E2EEF3] px-4 lg:px-6 py-1.5">
+        <div class="max-w-[1600px] mx-auto flex items-center justify-between">
+          <nav class="flex flex-wrap items-center gap-2" aria-label="SCADA Navigation">
+            <button
+              id="nav-btn-dashboard"
+              type="button"
+              class="px-3.5 py-1 rounded-full text-xs font-mono-tabular font-bold uppercase bg-teal-600 text-white shadow-sm transition"
+            >
+              Overview
+            </button>
+            <button
+              id="nav-btn-reports"
+              type="button"
+              class="px-3.5 py-1 rounded-full text-xs font-mono-tabular font-semibold uppercase bg-white text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-slate-200 transition"
+            >
+              Reports
+            </button>
+            <button
+              id="nav-btn-admin"
+              type="button"
+              class="hidden px-3.5 py-1 rounded-full text-xs font-mono-tabular font-semibold uppercase bg-white text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-slate-200 transition"
+            >
+              PID Tuning
+            </button>
+            <button
+              id="nav-btn-catalog"
+              type="button"
+              class="hidden px-3.5 py-1 rounded-full text-xs font-mono-tabular font-semibold uppercase bg-white text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-slate-200 transition"
+            >
+              Catalog
+            </button>
+            <button
+              id="nav-btn-simulator"
+              type="button"
+              class="hidden px-3.5 py-1 rounded-full text-xs font-mono-tabular font-semibold uppercase bg-white text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-slate-200 transition"
+            >
+              Simulator
+            </button>
+          </nav>
+          <span class="text-[11px] font-mono-tabular text-slate-400 hidden sm:inline">
+            3-NODE ESP32 • REVERSE-ACTING PID
+          </span>
+        </div>
+      </div>
+    </header>
+  </div>
+
+  <!-- ======================================================================
+       PAGE 1: SPLIT CLINICAL LOGIN PAGE
+       ====================================================================== -->
+  <section id="view-login" class="min-h-screen flex flex-col justify-between">
+
+    <div class="flex-1 max-w-[1320px] w-full mx-auto px-4 lg:px-8 py-6 flex items-center">
+      <div class="w-full grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
+
+        <!-- Left Side (7 cols): Brand & Isometric 3-Slot Closed Locker Preview -->
+        <div class="lg:col-span-7 space-y-5">
+          <div class="flex items-center gap-3.5">
+            <div class="w-12 h-12 rounded-2xl bg-white border border-[#DCEAF0] shadow-sm flex items-center justify-center">
+              <svg class="w-7 h-7 text-teal-600" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="22" height="22" rx="6" fill="#CCFBF1" fill-opacity="0.4"></rect>
+                <path d="M14 7v14M7 14h14" stroke-width="2.8" stroke-linecap="round"></path>
+                <circle cx="14" cy="4" r="1.6" fill="#0D9488"></circle>
+                <circle cx="24" cy="14" r="1.6" fill="#0D9488"></circle>
+                <circle cx="14" cy="24" r="1.6" fill="#0D9488"></circle>
+                <circle cx="4" cy="14" r="1.6" fill="#0D9488"></circle>
+              </svg>
+            </div>
+            <div>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono-tabular font-bold uppercase tracking-widest bg-teal-100/80 text-teal-800 border border-teal-200">
+                DCS SCADA HMI
+              </span>
+              <h1 class="text-2xl font-extrabold tracking-tight text-slate-900 mt-0.5">
+                SMART MEDICINE LOCKER
+              </h1>
+            </div>
+          </div>
+
+          <!-- Isometric 3-Slot Preview Card -->
+          <div class="hmi-panel p-5">
+            <div class="flex items-center justify-between mb-3">
+              <h2 class="text-xs font-mono-tabular font-bold uppercase tracking-wider text-slate-700">
+                LOCKER STATUS
+              </h2>
+              <span id="login-rtdb-pill" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#F3F8FA] border border-[#E2EEF3] text-xs font-mono-tabular">
+                <span id="login-rtdb-led" class="led-dot led-green"></span>
+                <span id="login-rtdb-text" class="text-teal-700 font-semibold">Firebase: Synced</span>
+              </span>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+              <!-- Isometric 3-Slot Closed Cabinet SVG -->
+              <div class="md:col-span-6 flex justify-center">
+                <svg viewBox="0 0 280 320" class="w-full max-w-[230px] drop-shadow-sm" aria-label="Isometric 3-Slot Medicine Cabinet">
+                  <defs>
+                    <linearGradient id="loginCabTop" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="#FFFFFF" />
+                      <stop offset="100%" stop-color="#E2EEF3" />
+                    </linearGradient>
+                    <linearGradient id="loginCabLeft" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" stop-color="#F8FBFD" />
+                      <stop offset="100%" stop-color="#DCEAF0" />
+                    </linearGradient>
+                    <linearGradient id="loginCabRight" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stop-color="#E6F4F7" />
+                      <stop offset="100%" stop-color="#CBDCE4" />
+                    </linearGradient>
+                  </defs>
+
+                  <polygon points="140,308 42,262 140,218 238,262" fill="rgba(15, 76, 92, 0.10)" />
+                  <polygon points="140,18 48,60 140,102 232,60" fill="url(#loginCabTop)" stroke="#B8D0DA" stroke-width="1.5" />
+                  <polygon points="48,60 140,102 140,296 48,254" fill="url(#loginCabLeft)" stroke="#B8D0DA" stroke-width="1.5" />
+                  <polygon points="140,102 232,60 232,254 140,296" fill="url(#loginCabRight)" stroke="#9CC0CE" stroke-width="1.5" />
+
+                  <g>
+                    <polygon points="146,108 226,71 226,125 146,162" fill="#FFFFFF" fill-opacity="0.82" stroke="#0D9488" stroke-width="1.4" />
+                    <line x1="154" y1="132" x2="154" y2="145" stroke="#0D9488" stroke-width="2.5" stroke-linecap="round" />
+                    <text x="0" y="0" transform="translate(164, 131) skewY(-25)" fill="#0F172A" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">SLOT 01</text>
+                    <circle id="login-svg-dot-locker_1" cx="214" cy="88" r="4" fill="#10B981" />
+                  </g>
+
+                  <g>
+                    <polygon points="146,168 226,131 226,185 146,222" fill="#FFFFFF" fill-opacity="0.82" stroke="#0D9488" stroke-width="1.4" />
+                    <line x1="154" y1="192" x2="154" y2="205" stroke="#0D9488" stroke-width="2.5" stroke-linecap="round" />
+                    <text x="0" y="0" transform="translate(164, 191) skewY(-25)" fill="#0F172A" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">SLOT 02</text>
+                    <circle id="login-svg-dot-locker_2" cx="214" cy="148" r="4" fill="#10B981" />
+                  </g>
+
+                  <g>
+                    <polygon points="146,228 226,191 226,245 146,282" fill="#FFFFFF" fill-opacity="0.82" stroke="#0D9488" stroke-width="1.4" />
+                    <line x1="154" y1="252" x2="154" y2="265" stroke="#0D9488" stroke-width="2.5" stroke-linecap="round" />
+                    <text x="0" y="0" transform="translate(164, 251) skewY(-25)" fill="#0F172A" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">SLOT 03</text>
+                    <circle id="login-svg-dot-locker_3" cx="214" cy="208" r="4" fill="#10B981" />
+                  </g>
+
+                  <g transform="translate(82, 145) skewY(24)">
+                    <rect x="-14" y="-14" width="28" height="28" rx="6" fill="#E6F7F5" stroke="#14B8A6" stroke-width="1.4" />
+                    <path d="M0 -7v14M-7 0h14" stroke="#0D9488" stroke-width="2.8" stroke-linecap="round" />
+                  </g>
+                </svg>
+              </div>
+
+              <!-- Live Slot Telemetry -->
+              <div class="md:col-span-6 space-y-2 font-mono-tabular text-xs">
+                <div class="hmi-subcard p-2.5 flex items-center justify-between">
+                  <div>
+                    <span class="text-[10px] font-bold text-teal-700 uppercase">LOCKER 01 • ESP 1</span>
+                    <p id="login-slot1-med" class="text-xs font-bold text-slate-800">General Medicine</p>
+                  </div>
+                  <div class="text-right">
+                    <span id="login-slot1-temp" class="text-sm font-bold text-teal-700">25.4°C</span>
+                    <span id="login-slot1-door" class="block text-[10px] text-emerald-700 font-semibold">LOCKED</span>
+                  </div>
+                </div>
+
+                <div class="hmi-subcard p-2.5 flex items-center justify-between">
+                  <div>
+                    <span class="text-[10px] font-bold text-teal-700 uppercase">LOCKER 02 • ESP 2</span>
+                    <p id="login-slot2-med" class="text-xs font-bold text-slate-800">General Medicine</p>
+                  </div>
+                  <div class="text-right">
+                    <span id="login-slot2-temp" class="text-sm font-bold text-teal-700">24.8°C</span>
+                    <span id="login-slot2-door" class="block text-[10px] text-emerald-700 font-semibold">LOCKED</span>
+                  </div>
+                </div>
+
+                <div class="hmi-subcard p-2.5 flex items-center justify-between">
+                  <div>
+                    <span class="text-[10px] font-bold text-teal-700 uppercase">LOCKER 03 • ESP 3</span>
+                    <p id="login-slot3-med" class="text-xs font-bold text-slate-800">General Medicine</p>
+                  </div>
+                  <div class="text-right">
+                    <span id="login-slot3-temp" class="text-sm font-bold text-teal-700">26.1°C</span>
+                    <span id="login-slot3-door" class="block text-[10px] text-emerald-700 font-semibold">LOCKED</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Side (5 cols): System Access Card -->
+        <div class="lg:col-span-5">
+          <div class="hmi-panel p-6 space-y-4 bg-white/95">
+            <div class="border-b border-[#E2EEF3] pb-3">
+              <h2 class="text-base font-extrabold uppercase tracking-wide text-slate-900">
+                System Access
+              </h2>
+            </div>
+
+            <!-- Alert Box -->
+            <div id="login-alert" class="hidden rounded-xl border border-red-300 bg-red-50 px-3.5 py-2.5 text-xs font-mono-tabular font-bold text-red-700"></div>
+
+            <!-- Top Section: RFID Auto-Login Box -->
+            <div id="panel-login-rfid" class="rounded-2xl bg-emerald-50/75 border border-emerald-200 p-4 space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-100 border border-emerald-300 text-[10px] font-mono-tabular font-bold text-emerald-800 uppercase">
+                  <span class="led-dot led-green"></span>
+                  RFID Auto-Login
+                </span>
+                <span class="text-[11px] font-mono-tabular text-emerald-800">
+                  UID: <strong id="login-last-rfid">--</strong>
+                </span>
+              </div>
+
+              <div class="flex items-center gap-3.5 py-1">
+                <div class="w-12 h-12 rounded-full bg-white border border-emerald-300 flex items-center justify-center shrink-0 rfid-pulse-ring shadow-sm">
+                  <svg class="w-6 h-6 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <rect x="2" y="5" width="20" height="14" rx="2"></rect>
+                    <line x1="2" y1="10" x2="22" y2="10"></line>
+                  </svg>
+                </div>
+                <div>
+                  <p class="text-xs font-bold text-slate-800 uppercase font-mono-tabular">
+                    Tap RFID Card
+                  </p>
+                  <p class="text-xs text-slate-500 font-mono-tabular mt-0.5">
+                    Waiting for ESP 1...
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Divider -->
+            <div class="relative flex py-0.5 items-center">
+              <div class="flex-grow border-t border-slate-200"></div>
+              <span class="flex-shrink mx-3 text-[10px] font-mono-tabular font-bold uppercase tracking-widest text-slate-400">
+                Manual Login
+              </span>
+              <div class="flex-grow border-t border-slate-200"></div>
+            </div>
+
+            <!-- Manual Login Form -->
+            <form id="panel-login-manual" autocomplete="off" class="space-y-3">
+              <div>
+                <label for="login-username" class="block text-xs font-mono-tabular font-bold uppercase text-slate-600 mb-1">
+                  Username
+                </label>
+                <input
+                  id="login-username"
+                  type="text"
+                  required
+                  autocomplete="off"
+                  placeholder="Enter username"
+                  class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3.5 py-2 text-sm font-mono-tabular text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white transition"
+                />
+              </div>
+              <div>
+                <label for="login-password" class="block text-xs font-mono-tabular font-bold uppercase text-slate-600 mb-1">
+                  Password
+                </label>
+                <input
+                  id="login-password"
+                  type="password"
+                  required
+                  autocomplete="new-password"
+                  placeholder="••••••••"
+                  class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3.5 py-2 text-sm font-mono-tabular text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white transition"
+                />
+              </div>
+              <button
+                type="submit"
+                class="w-full py-2.5 rounded-xl bg-gradient-to-r from-teal-600 to-teal-500 hover:from-teal-700 hover:to-teal-600 text-xs font-mono-tabular font-bold uppercase tracking-widest text-white shadow-sm transition"
+              >
+                Sign In
+              </button>
+            </form>
+
+            <!-- Interactive Demo Mode 1-Click Access Box (Hidden in Production Mode) -->
+            <div id="demo-login-box" class="hidden rounded-2xl bg-teal-50/80 border border-teal-200 p-3.5 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-teal-100 border border-teal-300 text-[10px] font-mono-tabular font-bold text-teal-800 uppercase">
+                  <span class="led-dot led-cyan"></span>
+                  Interactive Demo Mode
+                </span>
+                <span class="text-[10px] font-mono-tabular text-teal-700 font-semibold">
+                  1-Click Portfolio Access
+                </span>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  id="btn-demo-login-admin"
+                  type="button"
+                  class="w-full py-2 px-3 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-mono-tabular font-bold text-[11px] uppercase tracking-wider shadow-sm transition"
+                >
+                  Launch Demo (Admin)
+                </button>
+                <button
+                  id="btn-demo-login-operator"
+                  type="button"
+                  class="w-full py-2 px-3 rounded-xl bg-white hover:bg-teal-50 text-teal-800 border border-teal-300 font-mono-tabular font-bold text-[11px] uppercase tracking-wider shadow-sm transition"
+                >
+                  Launch Demo (Operator)
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Thin Clinical Footer Bar -->
+    <footer class="bg-white/85 border-t border-[#DCEAF0] px-4 lg:px-8 py-2.5 text-xs font-mono-tabular text-slate-600">
+      <div class="max-w-[1320px] mx-auto flex flex-wrap items-center justify-between gap-2">
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="inline-flex items-center gap-1.5"><span id="login-led-locker_1" class="led-dot led-off"></span>ESP 1</span>
+          <span class="inline-flex items-center gap-1.5"><span id="login-led-locker_2" class="led-dot led-off"></span>ESP 2</span>
+          <span class="inline-flex items-center gap-1.5"><span id="login-led-locker_3" class="led-dot led-off"></span>ESP 3</span>
+          <span class="text-slate-300">|</span>
+          <span class="text-teal-700 font-semibold">Firebase: Synced</span>
+        </div>
+        <div id="login-footer-clock" class="text-slate-500 font-semibold">--:--:--</div>
+      </div>
+    </footer>
+  </section>
+
+  <!-- ======================================================================
+       PAGE 2: OVERVIEW DASHBOARD
+       ====================================================================== -->
+  <main id="view-dashboard" class="hidden max-w-[1600px] mx-auto px-4 lg:px-6 py-5 space-y-5">
+
+    <!-- Top Summary Ring Gauges (4 Cards) -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4" aria-label="Summary Metrics">
+
+      <!-- Ring Gauge 1: Avg Temp -->
+      <div class="hmi-panel p-4 flex items-center justify-between gap-3">
+        <div>
+          <p class="text-[11px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500">Avg Temp</p>
+          <span id="kpi-avg-temp" class="text-2xl font-extrabold font-mono-tabular text-teal-700 block mt-1">--.-°C</span>
+          <p id="kpi-pid-summary" class="text-[11px] font-mono-tabular text-emerald-700 font-semibold mt-1">PID: AUTO</p>
+        </div>
+        <div class="relative w-14 h-14 flex items-center justify-center shrink-0">
+          <svg class="w-14 h-14" viewBox="0 0 64 64">
+            <circle cx="32" cy="32" r="26" fill="none" stroke-width="5.5" class="gauge-ring-bg"></circle>
+            <circle id="ring-avg-temp" cx="32" cy="32" r="26" fill="none" stroke="#0D9488" stroke-width="5.5" stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="45" class="gauge-ring-fg"></circle>
+          </svg>
+          <span class="absolute text-[10px] font-mono-tabular font-bold text-teal-700">°C</span>
+        </div>
+      </div>
+
+      <!-- Ring Gauge 2: Avg Humidity -->
+      <div class="hmi-panel p-4 flex items-center justify-between gap-3">
+        <div>
+          <p class="text-[11px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500">Avg Humidity</p>
+          <span id="kpi-avg-hum" class="text-2xl font-extrabold font-mono-tabular text-sky-700 block mt-1">--%</span>
+          <p class="text-[11px] font-mono-tabular text-slate-500 mt-1">DHT22 Sensor</p>
+        </div>
+        <div class="relative w-14 h-14 flex items-center justify-center shrink-0">
+          <svg class="w-14 h-14" viewBox="0 0 64 64">
+            <circle cx="32" cy="32" r="26" fill="none" stroke-width="5.5" class="gauge-ring-bg"></circle>
+            <circle id="ring-avg-hum" cx="32" cy="32" r="26" fill="none" stroke="#0284C7" stroke-width="5.5" stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="65" class="gauge-ring-fg"></circle>
+          </svg>
+          <span class="absolute text-[10px] font-mono-tabular font-bold text-sky-700">%</span>
+        </div>
+      </div>
+
+      <!-- Ring Gauge 3: Fan Speed & Stock -->
+      <div class="hmi-panel p-4 flex items-center justify-between gap-3">
+        <div>
+          <p class="text-[11px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500">Fan Speed</p>
+          <div class="flex items-baseline gap-2 mt-1">
+            <span id="kpi-avg-fan" class="text-2xl font-extrabold font-mono-tabular text-teal-700">--%</span>
+            <span id="kpi-avg-rpm" class="text-xs font-mono-tabular font-semibold text-slate-500">---- RPM</span>
+          </div>
+          <p class="text-[11px] font-mono-tabular text-slate-600 mt-1">
+            Stock: <strong id="kpi-total-stock" class="text-teal-700">--</strong> | Doors: <span id="kpi-doors-status" class="font-bold text-emerald-700">CLOSED</span>
+          </p>
+        </div>
+        <div class="relative w-14 h-14 flex items-center justify-center shrink-0">
+          <svg class="w-14 h-14" viewBox="0 0 64 64">
+            <circle cx="32" cy="32" r="26" fill="none" stroke-width="5.5" class="gauge-ring-bg"></circle>
+            <circle id="ring-avg-fan" cx="32" cy="32" r="26" fill="none" stroke="#14B8A6" stroke-width="5.5" stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="100" class="gauge-ring-fg"></circle>
+          </svg>
+          <span class="absolute text-[10px] font-mono-tabular font-bold text-teal-700">PWM</span>
+        </div>
+      </div>
+
+      <!-- Ring Gauge 4: Interlock Status -->
+      <div class="hmi-panel p-4 flex items-center justify-between gap-3">
+        <div>
+          <p class="text-[11px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500">Interlock</p>
+          <div class="flex items-baseline gap-2 mt-1">
+            <span id="kpi-interlock-state" class="text-xl font-extrabold font-mono-tabular text-emerald-700">READY</span>
+            <span id="kpi-online-count" class="text-xs font-mono-tabular font-bold text-slate-600">(3/3)</span>
+            <span id="kpi-online-label" class="sr-only">ONLINE</span>
+          </div>
+          <div class="flex items-center gap-2 mt-1 text-[11px] font-mono-tabular">
+            <span>Alarms: <strong id="kpi-active-alarms" class="text-emerald-700">0</strong></span>
+            <span id="kpi-unack-label" class="text-[10px] text-slate-500">CLEAR</span>
+            <button
+              id="btn-kpi-ack-all"
+              type="button"
+              class="px-2 py-0.5 rounded-full bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-800 text-[10px] font-bold transition"
+            >
+              ACK
+            </button>
+          </div>
+        </div>
+        <div class="relative w-14 h-14 flex items-center justify-center shrink-0">
+          <svg class="w-14 h-14" viewBox="0 0 64 64">
+            <circle cx="32" cy="32" r="26" fill="none" stroke-width="5.5" class="gauge-ring-bg"></circle>
+            <circle id="ring-interlock" cx="32" cy="32" r="26" fill="none" stroke="#10B981" stroke-width="5.5" stroke-linecap="round" stroke-dasharray="163.36" stroke-dashoffset="0" class="gauge-ring-fg"></circle>
+          </svg>
+          <span id="ring-interlock-text" class="absolute text-[10px] font-mono-tabular font-bold text-emerald-700">OK</span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ====================================================================
+         DCS LOCKER CORE HUB:
+         LEFT (4 cols): INTERACTIVE 3-TIER ISOMETRIC LOCKER SVG
+         RIGHT (8 cols): 3 LOCKER CARDS
+         ==================================================================== -->
+    <section class="grid grid-cols-1 xl:grid-cols-12 gap-5 items-stretch" aria-label="Locker Core Hub">
+
+      <!-- Left Column (4 cols): Interactive 3-Tier Cutaway Isometric Locker SVG -->
+      <div class="xl:col-span-4 hmi-panel p-4 flex flex-col justify-between">
+        <div class="flex items-center justify-between border-b border-[#E2EEF3] pb-2.5">
+          <h2 class="text-xs font-mono-tabular font-extrabold text-slate-800 uppercase tracking-wider">
+            ISOMETRIC CABINET
+          </h2>
+          <span class="px-2 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-[10px] font-mono-tabular font-bold text-teal-700">
+            LIVE
+          </span>
+        </div>
+
+        <div class="my-auto py-2 flex items-center justify-center">
+          <svg id="isometric-locker-svg" viewBox="0 0 380 540" class="w-full max-w-[350px] select-none" aria-label="Interactive Isometric Locker">
+            <defs>
+              <linearGradient id="cabRoofGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#FFFFFF" />
+                <stop offset="100%" stop-color="#DCEAF0" />
+              </linearGradient>
+              <linearGradient id="cabLeftWall" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#F8FBFD" />
+                <stop offset="100%" stop-color="#E2EEF3" />
+              </linearGradient>
+              <linearGradient id="cabBackWall" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#EBF5F8" />
+                <stop offset="100%" stop-color="#D5E6EE" />
+              </linearGradient>
+              <linearGradient id="glowCool" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#14B8A6" stop-opacity="0.18" />
+                <stop offset="100%" stop-color="#CCFBF1" stop-opacity="0.06" />
+              </linearGradient>
+              <linearGradient id="glowWarm" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#F59E0B" stop-opacity="0.38" />
+                <stop offset="100%" stop-color="#EF4444" stop-opacity="0.18" />
+              </linearGradient>
+              <linearGradient id="glowDanger" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#EF4444" stop-opacity="0.38" />
+                <stop offset="100%" stop-color="#FCA5A5" stop-opacity="0.14" />
+              </linearGradient>
+            </defs>
+
+            <polygon points="185,522 45,460 185,398 325,460" fill="rgba(15, 76, 92, 0.09)" />
+            <polygon points="185,20 55,78 185,136 315,78" fill="url(#cabRoofGrad)" stroke="#B0CAD6" stroke-width="2" />
+            <polygon points="55,78 185,136 185,505 55,447" fill="url(#cabLeftWall)" stroke="#B0CAD6" stroke-width="2" />
+            <polygon points="185,136 315,78 315,447 185,505" fill="url(#cabBackWall)" stroke="#9BBAC8" stroke-width="2" />
+            <polygon points="75,92 105,105 105,462 75,448" fill="#DDF2F4" stroke="#99D5D9" stroke-width="1" />
+
+            <!-- TIER 1: LOCKER 01 -->
+            <g id="iso-tier-locker_1" data-iso-locker="locker_1" class="iso-tier-group">
+              <polygon id="iso-glow-locker_1" class="iso-thermal-zone" points="188,142 309,88 309,198 188,252" fill="url(#glowCool)" stroke="#14B8A6" stroke-width="1.2" />
+              <polygon points="188,252 309,198 282,186 188,228" fill="#E2EEF3" stroke="#B0CAD6" stroke-width="1" />
+              <g transform="translate(116, 152)">
+                <circle id="iso-fan-ring-locker_1" cx="0" cy="0" r="19" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.8" />
+                <g id="iso-fan-locker_1" class="fan-rotor">
+                  <path id="iso-fan-blade-locker_1" d="M0,0 C-5,-12 5,-15 2,-3 C12,-5 15,5 3,2 C5,12 -5,15 -2,3 C-12,5 -15,-5 -3,-2 Z" fill="#0D9488" />
+                  <circle cx="0" cy="0" r="3.5" fill="#0F172A" />
+                </g>
+              </g>
+              <g id="iso-airflow-locker_1" class="airflow-path" style="opacity: 0.75">
+                <path d="M142,158 Q210,145 275,118" fill="none" stroke="#0D9488" stroke-width="2.2" stroke-linecap="round" />
+                <path d="M148,176 Q215,163 280,136" fill="none" stroke="#14B8A6" stroke-width="1.8" stroke-linecap="round" />
+                <polygon points="278,116 269,116 274,123" fill="#0D9488" />
+              </g>
+              <g transform="translate(222, 185)">
+                <rect x="0" y="0" width="22" height="16" rx="2" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2" transform="skewY(-24)" />
+                <rect x="27" y="-12" width="22" height="16" rx="2" fill="#E6F7F5" stroke="#0D9488" stroke-width="1.2" transform="skewY(-24)" />
+              </g>
+              <g id="iso-door-locker_1" class="iso-door-panel">
+                <polygon points="188,142 309,88 309,198 188,252" fill="rgba(255, 255, 255, 0.36)" stroke="#0D9488" stroke-width="1.8" />
+                <line x1="198" y1="190" x2="198" y2="212" stroke="#0F172A" stroke-width="3" stroke-linecap="round" />
+                <rect id="iso-lock-bg-locker_1" x="242" y="102" width="58" height="18" rx="9" fill="#DCFCE7" stroke="#10B981" stroke-width="1" />
+                <text id="iso-lock-txt-locker_1" x="271" y="114" text-anchor="middle" fill="#047857" font-family="JetBrains Mono, monospace" font-size="8.5" font-weight="700">LOCKED</text>
+              </g>
+              <text x="0" y="0" transform="translate(68, 162) skewY(24)" fill="#0F172A" font-family="JetBrains Mono, monospace" font-size="11" font-weight="800">LOCKER 01</text>
+              <text id="iso-temp-txt-locker_1" x="0" y="0" transform="translate(68, 178) skewY(24)" fill="#0D9488" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">25.4°C • 35%</text>
+              <line x1="315" y1="142" x2="375" y2="142" stroke="#0D9488" stroke-width="1.5" stroke-dasharray="3 3" />
+              <circle cx="315" cy="142" r="4" fill="#0D9488" />
+            </g>
+
+            <!-- TIER 2: LOCKER 02 -->
+            <g id="iso-tier-locker_2" data-iso-locker="locker_2" class="iso-tier-group">
+              <polygon id="iso-glow-locker_2" class="iso-thermal-zone" points="188,264 309,210 309,320 188,374" fill="url(#glowCool)" stroke="#14B8A6" stroke-width="1.2" />
+              <polygon points="188,374 309,320 282,308 188,350" fill="#E2EEF3" stroke="#B0CAD6" stroke-width="1" />
+              <g transform="translate(116, 274)">
+                <circle id="iso-fan-ring-locker_2" cx="0" cy="0" r="19" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.8" />
+                <g id="iso-fan-locker_2" class="fan-rotor">
+                  <path id="iso-fan-blade-locker_2" d="M0,0 C-5,-12 5,-15 2,-3 C12,-5 15,5 3,2 C5,12 -5,15 -2,3 C-12,5 -15,-5 -3,-2 Z" fill="#0D9488" />
+                  <circle cx="0" cy="0" r="3.5" fill="#0F172A" />
+                </g>
+              </g>
+              <g id="iso-airflow-locker_2" class="airflow-path" style="opacity: 0.6">
+                <path d="M142,280 Q210,267 275,240" fill="none" stroke="#0D9488" stroke-width="2.2" stroke-linecap="round" />
+                <path d="M148,298 Q215,285 280,258" fill="none" stroke="#14B8A6" stroke-width="1.8" stroke-linecap="round" />
+                <polygon points="278,238 269,238 274,245" fill="#0D9488" />
+              </g>
+              <g transform="translate(222, 307)">
+                <rect x="0" y="0" width="22" height="16" rx="2" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2" transform="skewY(-24)" />
+                <rect x="27" y="-12" width="22" height="16" rx="2" fill="#E6F7F5" stroke="#0D9488" stroke-width="1.2" transform="skewY(-24)" />
+              </g>
+              <g id="iso-door-locker_2" class="iso-door-panel">
+                <polygon points="188,264 309,210 309,320 188,374" fill="rgba(255, 255, 255, 0.36)" stroke="#0D9488" stroke-width="1.8" />
+                <line x1="198" y1="312" x2="198" y2="334" stroke="#0F172A" stroke-width="3" stroke-linecap="round" />
+                <rect id="iso-lock-bg-locker_2" x="242" y="224" width="58" height="18" rx="9" fill="#DCFCE7" stroke="#10B981" stroke-width="1" />
+                <text id="iso-lock-txt-locker_2" x="271" y="236" text-anchor="middle" fill="#047857" font-family="JetBrains Mono, monospace" font-size="8.5" font-weight="700">LOCKED</text>
+              </g>
+              <text x="0" y="0" transform="translate(68, 284) skewY(24)" fill="#0F172A" font-family="JetBrains Mono, monospace" font-size="11" font-weight="800">LOCKER 02</text>
+              <text id="iso-temp-txt-locker_2" x="0" y="0" transform="translate(68, 300) skewY(24)" fill="#0D9488" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">24.8°C • 20%</text>
+              <line x1="315" y1="264" x2="375" y2="264" stroke="#0D9488" stroke-width="1.5" stroke-dasharray="3 3" />
+              <circle cx="315" cy="264" r="4" fill="#0D9488" />
+            </g>
+
+            <!-- TIER 3: LOCKER 03 -->
+            <g id="iso-tier-locker_3" data-iso-locker="locker_3" class="iso-tier-group">
+              <polygon id="iso-glow-locker_3" class="iso-thermal-zone" points="188,386 309,332 309,442 188,496" fill="url(#glowCool)" stroke="#14B8A6" stroke-width="1.2" />
+              <polygon points="188,496 309,442 282,430 188,472" fill="#E2EEF3" stroke="#B0CAD6" stroke-width="1" />
+              <g transform="translate(116, 396)">
+                <circle id="iso-fan-ring-locker_3" cx="0" cy="0" r="19" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.8" />
+                <g id="iso-fan-locker_3" class="fan-rotor">
+                  <path id="iso-fan-blade-locker_3" d="M0,0 C-5,-12 5,-15 2,-3 C12,-5 15,5 3,2 C5,12 -5,15 -2,3 C-12,5 -15,-5 -3,-2 Z" fill="#0D9488" />
+                  <circle cx="0" cy="0" r="3.5" fill="#0F172A" />
+                </g>
+              </g>
+              <g id="iso-airflow-locker_3" class="airflow-path" style="opacity: 0.9">
+                <path d="M142,402 Q210,389 275,362" fill="none" stroke="#0D9488" stroke-width="2.2" stroke-linecap="round" />
+                <path d="M148,420 Q215,407 280,380" fill="none" stroke="#14B8A6" stroke-width="1.8" stroke-linecap="round" />
+                <polygon points="278,360 269,360 274,367" fill="#0D9488" />
+              </g>
+              <g transform="translate(222, 429)">
+                <rect x="0" y="0" width="22" height="16" rx="2" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.2" transform="skewY(-24)" />
+                <rect x="27" y="-12" width="22" height="16" rx="2" fill="#E6F7F5" stroke="#0D9488" stroke-width="1.2" transform="skewY(-24)" />
+              </g>
+              <g id="iso-door-locker_3" class="iso-door-panel">
+                <polygon points="188,386 309,332 309,442 188,496" fill="rgba(255, 255, 255, 0.36)" stroke="#0D9488" stroke-width="1.8" />
+                <line x1="198" y1="434" x2="198" y2="456" stroke="#0F172A" stroke-width="3" stroke-linecap="round" />
+                <rect id="iso-lock-bg-locker_3" x="242" y="346" width="58" height="18" rx="9" fill="#DCFCE7" stroke="#10B981" stroke-width="1" />
+                <text id="iso-lock-txt-locker_3" x="271" y="358" text-anchor="middle" fill="#047857" font-family="JetBrains Mono, monospace" font-size="8.5" font-weight="700">LOCKED</text>
+              </g>
+              <text x="0" y="0" transform="translate(68, 406) skewY(24)" fill="#0F172A" font-family="JetBrains Mono, monospace" font-size="11" font-weight="800">LOCKER 03</text>
+              <text id="iso-temp-txt-locker_3" x="0" y="0" transform="translate(68, 422) skewY(24)" fill="#0D9488" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">26.1°C • 55%</text>
+              <line x1="315" y1="386" x2="375" y2="386" stroke="#0D9488" stroke-width="1.5" stroke-dasharray="3 3" />
+              <circle cx="315" cy="386" r="4" fill="#0D9488" />
+            </g>
+          </svg>
+        </div>
+
+        <div class="rounded-xl bg-[#F3F8FA] border border-[#E2EEF3] px-3 py-2 text-[11px] font-mono-tabular text-slate-600 flex items-center justify-between gap-2">
+          <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-teal-400/30 border border-teal-500 inline-block"></span>Normal</span>
+          <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-amber-400/40 border border-amber-500 inline-block"></span>High Temp</span>
+          <span class="inline-flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-red-400/40 border border-red-500 inline-block"></span>Fault</span>
+        </div>
+      </div>
+
+      <!-- Right Column (8 cols): 3 Identical Locker Cards -->
+      <div class="xl:col-span-8 flex flex-col justify-between">
+        <div id="lockers-grid" class="grid grid-cols-1 gap-4"></div>
+      </div>
+
+    </section>
+
+    <!-- ====================================================================
+         BOTTOM ROW: ACTIVE ALARMS + AUDIT LOG
+         ==================================================================== -->
+    <section class="grid grid-cols-1 xl:grid-cols-12 gap-5" aria-label="Alarms and Audit Log">
+
+      <!-- Active Alarms Panel (5 cols) -->
+      <div class="xl:col-span-5 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <span id="panel-alarm-led" class="led-dot led-green"></span>
+            <h2 class="text-sm font-extrabold text-slate-900 uppercase tracking-wide">Active Alarms</h2>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <button
+              id="btn-ack-all-alarms"
+              type="button"
+              class="px-3 py-1 rounded-full bg-amber-50 hover:bg-amber-100 border border-amber-300 text-[11px] font-mono-tabular font-bold text-amber-800 uppercase transition"
+            >
+              ACK
+            </button>
+            <button
+              id="btn-export-alarms"
+              type="button"
+              class="px-2.5 py-1 rounded-full bg-white hover:bg-slate-50 border border-slate-200 text-[11px] font-mono-tabular font-semibold text-slate-700 transition"
+            >
+              Export CSV
+            </button>
+          </div>
+        </div>
+
+        <div id="active-alarms-strip" class="p-3 border-b border-[#E2EEF3] bg-[#F3F8FA] space-y-2"></div>
+
+        <div class="overflow-y-auto hmi-scroll max-h-[260px] flex-1">
+          <table class="w-full text-left border-collapse">
+            <thead class="sticky top-0 bg-[#F8FBFD] border-b border-[#E2EEF3] text-[10px] font-mono-tabular uppercase tracking-wider text-slate-500 z-10">
+              <tr>
+                <th class="py-2 px-3.5">Time</th>
+                <th class="py-2 px-2">Locker</th>
+                <th class="py-2 px-2">Type</th>
+                <th class="py-2 px-3.5">Alarm</th>
+              </tr>
+            </thead>
+            <tbody id="alarm-log-body" class="divide-y divide-slate-100 text-xs font-mono-tabular"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Audit Log Table (7 cols) -->
+      <div class="xl:col-span-7 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <h2 class="text-sm font-extrabold text-slate-900 uppercase tracking-wide">Audit Log</h2>
+            <span class="px-2 py-0.5 rounded-full bg-slate-100 text-[11px] font-mono-tabular font-bold text-slate-600" id="tx-log-count">0</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <select
+              id="tx-filter-locker"
+              aria-label="Filter Locker"
+              class="bg-white border border-slate-200 rounded-full px-3 py-1 text-[11px] font-mono-tabular font-semibold text-slate-700 focus:outline-none focus:border-teal-500"
+            >
+              <option value="ALL">All Lockers</option>
+              <option value="locker_1">Locker 01</option>
+              <option value="locker_2">Locker 02</option>
+              <option value="locker_3">Locker 03</option>
+            </select>
+            <button
+              id="btn-export-tx"
+              type="button"
+              class="px-3 py-1 rounded-full bg-teal-50 hover:bg-teal-100 border border-teal-200 text-[11px] font-mono-tabular font-bold text-teal-800 transition"
+            >
+              Export CSV
+            </button>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto overflow-y-auto hmi-scroll max-h-[340px] flex-1">
+          <table class="w-full text-left border-collapse">
+            <thead class="sticky top-0 bg-[#F8FBFD] border-b border-[#E2EEF3] text-[10px] font-mono-tabular uppercase tracking-wider text-slate-500 z-10">
+              <tr>
+                <th class="py-2 px-3.5">Time</th>
+                <th class="py-2 px-2.5">User</th>
+                <th class="py-2 px-2.5">Locker</th>
+                <th class="py-2 px-2.5">Item</th>
+                <th class="py-2 px-2">Action</th>
+                <th class="py-2 px-2 text-right">Qty</th>
+                <th class="py-2 px-2 text-right">Stock</th>
+                <th class="py-2 px-3.5">Note</th>
+              </tr>
+            </thead>
+            <tbody id="tx-log-body" class="divide-y divide-slate-100 text-xs font-mono-tabular"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- ======================================================================
+       PAGE 3B: COLD-CHAIN COMPLIANCE REPORTS TAB (24H HISTORY & PRINT/PDF)
+       ====================================================================== -->
+  <main id="view-reports" class="hidden max-w-[1600px] mx-auto px-4 lg:px-6 py-5 space-y-5">
+
+    <!-- Print-Only Official Report Header -->
+    <div class="print-only border-b-2 border-slate-800 pb-3 mb-4">
+      <h1 class="text-lg font-extrabold uppercase tracking-wider text-slate-900">SMART MEDICINE LOCKER — COLD-CHAIN COMPLIANCE REPORT</h1>
+      <p id="report-print-meta" class="text-xs font-mono-tabular text-slate-600 mt-1">Generated: --</p>
+    </div>
+
+    <!-- Reports Toolbar -->
+    <div class="hmi-panel px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 no-print">
+      <div class="flex items-center gap-2.5">
+        <span class="px-2.5 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-[10px] font-mono-tabular font-bold uppercase">
+          24H LOG (5M)
+        </span>
+        <h2 class="text-base font-extrabold uppercase tracking-wide text-slate-900">
+          Cold-Chain Reports
+        </h2>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button
+          id="btn-log-snapshot-now"
+          type="button"
+          class="px-3.5 py-1.5 rounded-full bg-white hover:bg-teal-50 border border-slate-200 text-xs font-mono-tabular font-bold text-teal-800 uppercase transition"
+        >
+          Log Snapshot
+        </button>
+        <button
+          id="btn-export-report-csv"
+          type="button"
+          class="px-3.5 py-1.5 rounded-full bg-teal-50 hover:bg-teal-100 border border-teal-200 text-xs font-mono-tabular font-bold text-teal-800 uppercase transition"
+        >
+          Export CSV
+        </button>
+        <button
+          id="btn-export-report-xlsx"
+          type="button"
+          class="px-3.5 py-1.5 rounded-full bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-xs font-mono-tabular font-bold text-emerald-800 uppercase transition"
+        >
+          Export Excel (.xlsx)
+        </button>
+        <button
+          id="btn-print-report"
+          type="button"
+          class="px-3.5 py-1.5 rounded-full bg-teal-600 hover:bg-teal-700 text-xs font-mono-tabular font-bold text-white uppercase shadow-sm transition"
+        >
+          Print / PDF
+        </button>
+      </div>
+    </div>
+
+    <!-- Compliance Summary Table (Per Locker) -->
+    <section class="hmi-panel overflow-hidden" aria-label="Compliance Summary">
+      <div class="hmi-panel-header px-5 py-3 flex items-center justify-between">
+        <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+          Compliance Summary
+        </h3>
+        <span id="report-last-logged" class="text-[11px] font-mono-tabular text-slate-500">Last Log: --</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse text-xs font-mono-tabular">
+          <thead class="bg-[#F8FBFD] border-b border-[#E2EEF3] text-[10px] uppercase text-slate-500">
+            <tr>
+              <th class="py-2.5 px-4">Locker</th>
+              <th class="py-2.5 px-3">Item / Batch</th>
+              <th class="py-2.5 px-3">Exp</th>
+              <th class="py-2.5 px-2 text-right">Samples</th>
+              <th class="py-2.5 px-3 text-right">Temp Min / Avg / Max</th>
+              <th class="py-2.5 px-3 text-right">Hum Min / Avg / Max</th>
+              <th class="py-2.5 px-3 text-right">Excursion (min)</th>
+              <th class="py-2.5 px-4 text-center">Status</th>
+            </tr>
+          </thead>
+          <tbody id="report-summary-body" class="divide-y divide-slate-100"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Historical 24H Chart + Recent History Samples -->
+    <section class="grid grid-cols-1 xl:grid-cols-12 gap-5" aria-label="Historical Data">
+      <div class="xl:col-span-7 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            24H Temp Trend
+          </h3>
+          <div class="flex items-center bg-[#F3F8FA] border border-[#E2EEF3] rounded-full p-1 font-mono-tabular text-xs no-print">
+            <button type="button" data-report-locker="locker_1" class="report-locker-tab px-3 py-1 rounded-full font-bold bg-teal-600 text-white shadow-sm">
+              Locker 01
+            </button>
+            <button type="button" data-report-locker="locker_2" class="report-locker-tab px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700">
+              Locker 02
+            </button>
+            <button type="button" data-report-locker="locker_3" class="report-locker-tab px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700">
+              Locker 03
+            </button>
+          </div>
+        </div>
+        <div class="p-4 flex-1 min-h-[290px] relative bg-white">
+          <canvas id="reportHistoryChart" aria-label="History Chart"></canvas>
+        </div>
+      </div>
+
+      <div class="xl:col-span-5 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            History Log
+          </h3>
+          <span id="report-sample-badge" class="text-[11px] font-mono-tabular font-bold text-teal-700">LOCKER 01</span>
+        </div>
+        <div class="overflow-y-auto hmi-scroll max-h-[310px] flex-1">
+          <table class="w-full text-left border-collapse text-xs font-mono-tabular">
+            <thead class="sticky top-0 bg-[#F8FBFD] border-b border-[#E2EEF3] text-[10px] uppercase text-slate-500">
+              <tr>
+                <th class="py-2 px-3">Time</th>
+                <th class="py-2 px-2 text-right">Temp</th>
+                <th class="py-2 px-2 text-right">SP</th>
+                <th class="py-2 px-2 text-right">Hum</th>
+                <th class="py-2 px-2 text-right">PWM</th>
+                <th class="py-2 px-3 text-center">State</th>
+              </tr>
+            </thead>
+            <tbody id="report-history-body" class="divide-y divide-slate-100"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ======================================================================
+       PAGE 4: ADMIN — PID TUNING, CATALOG, USERS, TELEGRAM & SIMULATOR
+       ====================================================================== -->
+  <main id="view-admin" class="hidden max-w-[1600px] mx-auto px-4 lg:px-6 py-5 space-y-5">
+
+    <div class="hmi-panel px-5 py-3.5 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-2.5">
+        <span class="px-2.5 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-[10px] font-mono-tabular font-bold uppercase">
+          ADMIN
+        </span>
+        <h2 class="text-base font-extrabold uppercase tracking-wide text-slate-900">
+          PID Tuning &amp; System Config
+        </h2>
+      </div>
+      <button
+        id="btn-back-dashboard"
+        type="button"
+        class="px-3.5 py-1.5 rounded-full bg-white hover:bg-teal-50 border border-slate-200 text-xs font-mono-tabular font-bold text-teal-800 uppercase shadow-sm transition"
+      >
+        ← Overview
+      </button>
+    </div>
+
+    <!-- LIVE PID PERFORMANCE METRICS (3 CARDS) -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-4" aria-label="PID Performance Metrics">
+      <div class="hmi-panel px-5 py-3.5 flex items-center justify-between">
+        <div>
+          <span class="text-[10px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500 block">Steady-State Error (e_ss)</span>
+          <strong id="pid-metric-ess" class="text-2xl font-extrabold font-mono-tabular text-teal-700 mt-0.5 block">-- °C</strong>
+        </div>
+        <span class="px-2.5 py-1 rounded-full bg-[#F3F8FA] border border-[#E2EEF3] text-[10px] font-mono-tabular font-bold text-slate-500">LAST 5 AVG</span>
+      </div>
+      <div class="hmi-panel px-5 py-3.5 flex items-center justify-between">
+        <div>
+          <span class="text-[10px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500 block">Peak Overshoot</span>
+          <strong id="pid-metric-overshoot" class="text-2xl font-extrabold font-mono-tabular text-indigo-600 mt-0.5 block">-- %</strong>
+        </div>
+        <span class="px-2.5 py-1 rounded-full bg-[#F3F8FA] border border-[#E2EEF3] text-[10px] font-mono-tabular font-bold text-slate-500">MAX (PV-SP)/SP</span>
+      </div>
+      <div class="hmi-panel px-5 py-3.5 flex items-center justify-between">
+        <div>
+          <span class="text-[10px] font-mono-tabular font-bold uppercase tracking-wider text-slate-500 block">Avg PWM Load</span>
+          <strong id="pid-metric-pwm" class="text-2xl font-extrabold font-mono-tabular text-amber-600 mt-0.5 block">-- %</strong>
+        </div>
+        <span class="px-2.5 py-1 rounded-full bg-[#F3F8FA] border border-[#E2EEF3] text-[10px] font-mono-tabular font-bold text-slate-500">WINDOW AVG</span>
+      </div>
+    </section>
+
+    <!-- SECTION 1: PID TUNING -->
+    <section class="grid grid-cols-1 xl:grid-cols-12 gap-5" aria-label="PID Tuning">
+
+      <!-- Left: Real-Time PID Chart (7 cols) -->
+      <div class="xl:col-span-7 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3 flex flex-wrap items-center justify-between gap-3">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            PID Response
+          </h3>
+          <div class="flex items-center bg-[#F3F8FA] border border-[#E2EEF3] rounded-full p-1 font-mono-tabular text-xs">
+            <button type="button" data-pid-locker="locker_1" class="pid-locker-tab px-3 py-1 rounded-full font-bold bg-teal-600 text-white shadow-sm">
+              Locker 01
+            </button>
+            <button type="button" data-pid-locker="locker_2" class="pid-locker-tab px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700">
+              Locker 02
+            </button>
+            <button type="button" data-pid-locker="locker_3" class="pid-locker-tab px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700">
+              Locker 03
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 px-5 py-2.5 bg-[#F3F8FA] border-b border-[#E2EEF3] font-mono-tabular text-xs">
+          <div>
+            <span class="text-[10px] text-slate-500 block font-semibold">SP</span>
+            <strong id="pid-live-sp" class="text-indigo-600 text-sm">--.- °C</strong>
+          </div>
+          <div>
+            <span class="text-[10px] text-slate-500 block font-semibold">TEMP (PV)</span>
+            <strong id="pid-live-pv" class="text-teal-700 text-sm">--.- °C</strong>
+          </div>
+          <div>
+            <span class="text-[10px] text-slate-500 block font-semibold">ERROR</span>
+            <strong id="pid-live-err" class="text-slate-800 text-sm">--.- °C</strong>
+          </div>
+          <div>
+            <span class="text-[10px] text-slate-500 block font-semibold">PWM (MV)</span>
+            <strong id="pid-live-pwm" class="text-amber-600 text-sm">-- %</strong>
+          </div>
+          <div>
+            <span class="text-[10px] text-slate-500 block font-semibold">FAN SPEED</span>
+            <strong id="pid-live-rpm" class="text-sky-700 text-sm">---- RPM</strong>
+          </div>
+        </div>
+
+        <div class="p-4 flex-1 min-h-[300px] relative bg-white">
+          <canvas id="pidResponseChart" aria-label="PID Chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Right: PID Gains & Manual PWM (5 cols) -->
+      <div class="xl:col-span-5 hmi-panel overflow-hidden flex flex-col justify-between">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+              PID Tuning
+            </h3>
+            <code id="pid-target-path" class="text-[11px] font-mono-tabular text-teal-700">/lockers/locker_1/pid</code>
+          </div>
+          <span id="pid-selected-badge" class="px-3 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-xs font-mono-tabular font-bold">
+            LOCKER 01
+          </span>
+        </div>
+
+        <div class="p-5 space-y-4 flex-1">
+          <form id="form-pid-tuning" class="space-y-3.5">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label for="input-pid-sp" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">
+                  SP (°C)
+                </label>
+                <input
+                  id="input-pid-sp"
+                  type="number"
+                  step="0.1"
+                  min="10"
+                  max="35"
+                  required
+                  class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-sm font-mono-tabular text-teal-800 font-bold focus:outline-none focus:border-teal-500 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label for="input-pid-kp" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">
+                  Kp
+                </label>
+                <input
+                  id="input-pid-kp"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="500"
+                  required
+                  class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-sm font-mono-tabular text-slate-900 font-semibold focus:outline-none focus:border-teal-500 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label for="input-pid-ki" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">
+                  Ki
+                </label>
+                <input
+                  id="input-pid-ki"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  required
+                  class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-sm font-mono-tabular text-slate-900 font-semibold focus:outline-none focus:border-teal-500 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label for="input-pid-kd" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">
+                  Kd
+                </label>
+                <input
+                  id="input-pid-kd"
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="200"
+                  required
+                  class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-sm font-mono-tabular text-slate-900 font-semibold focus:outline-none focus:border-teal-500 focus:bg-white"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              class="w-full py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-xs font-mono-tabular font-bold uppercase tracking-wider text-white shadow-sm transition"
+            >
+              Apply
+            </button>
+          </form>
+
+          <!-- Mode: AUTO / MANUAL -->
+          <div class="hmi-subcard p-4 space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="text-xs font-extrabold uppercase tracking-wider text-slate-800 font-mono-tabular">
+                Mode: AUTO / MANUAL
+              </h4>
+              <div class="flex items-center bg-white border border-slate-200 rounded-full p-1 font-mono-tabular text-xs">
+                <button
+                  id="btn-pid-mode-auto"
+                  type="button"
+                  class="px-3 py-1 rounded-full font-bold bg-teal-600 text-white"
+                >
+                  AUTO
+                </button>
+                <button
+                  id="btn-pid-mode-manual"
+                  type="button"
+                  class="px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700"
+                >
+                  MANUAL
+                </button>
+              </div>
+            </div>
+
+            <div class="space-y-2">
+              <div class="flex items-center justify-between text-xs font-mono-tabular">
+                <label for="slider-manual-pwm" class="text-slate-700 font-semibold">Manual PWM</label>
+                <span id="label-manual-pwm" class="text-teal-700 font-extrabold">0%</span>
+              </div>
+              <input
+                id="slider-manual-pwm"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value="0"
+                class="w-full accent-teal-600 cursor-pointer"
+              />
+              <button
+                id="btn-apply-manual-pwm"
+                type="button"
+                class="w-full py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-xs font-mono-tabular font-bold uppercase tracking-wider text-white shadow-sm transition"
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 2: ASSIGN LOCKER (WITH BATCH & EXPIRY) + MEDICINE CATALOG -->
+    <section id="section-medicine-catalog" class="grid grid-cols-1 xl:grid-cols-12 gap-5" aria-label="Medicine Catalog">
+
+      <!-- Assign Locker (5 cols) -->
+      <div class="xl:col-span-5 hmi-panel overflow-hidden">
+        <div class="hmi-panel-header px-5 py-3">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            Assign Locker
+          </h3>
+        </div>
+        <form id="form-assign-medicine" class="p-5 space-y-3.5">
+          <div>
+            <label for="assign-locker-id" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">Locker</label>
+            <select
+              id="assign-locker-id"
+              class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3.5 py-2 text-xs font-mono-tabular font-semibold text-slate-800"
+            >
+              <option value="locker_1">Locker 01 (ESP 1)</option>
+              <option value="locker_2">Locker 02 (ESP 2)</option>
+              <option value="locker_3">Locker 03 (ESP 3)</option>
+            </select>
+          </div>
+          <div>
+            <label for="assign-medicine-id" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">Medicine</label>
+            <select
+              id="assign-medicine-id"
+              class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3.5 py-2 text-xs font-mono-tabular font-bold text-teal-800"
+            ></select>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label for="assign-batch-no" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">Batch No</label>
+              <input
+                id="assign-batch-no"
+                type="text"
+                placeholder="BCH-2026-01"
+                class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-xs font-mono-tabular text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+              />
+            </div>
+            <div>
+              <label for="assign-expiry-date" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">Expiry Date</label>
+              <input
+                id="assign-expiry-date"
+                type="date"
+                class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-xs font-mono-tabular text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+              />
+            </div>
+          </div>
+          <label class="flex items-center gap-2 text-xs font-mono-tabular text-slate-700 cursor-pointer">
+            <input id="assign-auto-setpoint" type="checkbox" checked class="rounded accent-teal-600 w-4 h-4" />
+            <span>Sync Default SP</span>
+          </label>
+          <button
+            type="submit"
+            class="w-full py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-xs font-mono-tabular font-bold uppercase tracking-wider text-white shadow-sm transition"
+          >
+            Apply
+          </button>
+        </form>
+      </div>
+
+      <!-- Medicine Catalog & Add Item (7 cols) -->
+      <div class="xl:col-span-7 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            Medicine Catalog
+          </h3>
+        </div>
+
+        <div class="p-5 space-y-4">
+          <div class="overflow-x-auto hmi-scroll max-h-[200px] border border-[#E2EEF3] rounded-xl">
+            <table class="w-full text-left border-collapse text-xs font-mono-tabular">
+              <thead class="bg-[#F3F8FA] border-b border-[#E2EEF3] text-[10px] uppercase text-slate-500">
+                <tr>
+                  <th class="py-2 px-3">ID</th>
+                  <th class="py-2 px-3">Item</th>
+                  <th class="py-2 px-2">Category</th>
+                  <th class="py-2 px-2 text-right">SP</th>
+                  <th class="py-2 px-2 text-right">Max T</th>
+                  <th class="py-2 px-2 text-right">Max H</th>
+                  <th class="py-2 px-2 text-right">Min Stock</th>
+                </tr>
+              </thead>
+              <tbody id="catalog-table-body" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
+
+          <form id="form-add-medicine" class="hmi-subcard p-3.5 space-y-2.5">
+            <p class="text-xs font-mono-tabular font-extrabold uppercase text-teal-800">Add Item</p>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input id="med-new-name" type="text" required placeholder="Item Name" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="med-new-cat" type="text" required placeholder="Category" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="med-new-sp" type="number" step="0.1" required placeholder="SP (°C)" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="med-new-max-t" type="number" step="0.1" required placeholder="Max Temp (°C)" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="med-new-max-h" type="number" step="1" required placeholder="Max Hum (%)" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="med-new-min-s" type="number" step="1" required placeholder="Min Stock" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+            </div>
+            <button
+              type="submit"
+              class="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-xs font-mono-tabular font-bold uppercase text-white shadow-sm transition"
+            >
+              Add Item
+            </button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 3: RFID USERS (RBAC L1/L2/L3) + TELEGRAM ALERTS -->
+    <section class="grid grid-cols-1 xl:grid-cols-12 gap-5 items-stretch" aria-label="Users and Telegram">
+
+      <!-- RFID Users with Per-Locker RBAC (7 cols) -->
+      <div class="xl:col-span-7 hmi-panel overflow-hidden">
+        <div class="hmi-panel-header px-5 py-3">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            RFID Users
+          </h3>
+        </div>
+        <div class="p-5 space-y-4">
+          <div class="overflow-x-auto border border-[#E2EEF3] rounded-xl">
+            <table class="w-full text-left border-collapse text-xs font-mono-tabular">
+              <thead class="bg-[#F3F8FA] border-b border-[#E2EEF3] text-[10px] uppercase text-slate-500">
+                <tr>
+                  <th class="py-2 px-3">UID</th>
+                  <th class="py-2 px-2">Name</th>
+                  <th class="py-2 px-2">Role</th>
+                  <th class="py-2 px-2">Access</th>
+                  <th class="py-2 px-2">State</th>
+                  <th class="py-2 px-2 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body" class="divide-y divide-slate-100"></tbody>
+            </table>
+          </div>
+
+          <form id="form-add-user" class="hmi-subcard p-3.5 space-y-2.5">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-xs font-mono-tabular font-extrabold uppercase text-teal-800">Add User</p>
+              <span id="user-scan-status" class="hidden text-[11px] font-mono-tabular font-bold"></span>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div class="flex items-center gap-1.5">
+                <input id="user-new-uid" type="text" required placeholder="RFID UID" class="w-full min-w-0 rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800 focus:outline-none focus:border-teal-500" />
+                <button
+                  id="btn-scan-user-uid"
+                  type="button"
+                  class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-teal-50 hover:bg-teal-100 border border-teal-300 text-[11px] font-mono-tabular font-bold text-teal-800 transition whitespace-nowrap"
+                >
+                  <span id="scan-user-uid-dot" class="hidden w-2 h-2 rounded-full bg-teal-600 animate-ping"></span>
+                  <span id="scan-user-uid-label">Scan Card</span>
+                </button>
+              </div>
+              <input id="user-new-name" type="text" required placeholder="Full Name" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="user-new-username" type="text" required placeholder="Username" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <input id="user-new-password" type="text" required placeholder="Password" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular text-slate-800" />
+              <select id="user-new-role" class="rounded-lg bg-white border border-[#DCEAF0] px-3 py-1.5 text-xs font-mono-tabular font-semibold text-slate-800">
+                <option value="operator">OPERATOR</option>
+                <option value="admin">ADMIN</option>
+                <option value="monitoring">MONITORING</option>
+              </select>
+              <div class="flex items-center justify-around bg-white border border-[#DCEAF0] rounded-lg px-2 py-1.5 text-[11px] font-mono-tabular font-bold text-slate-700">
+                <label class="inline-flex items-center gap-1 cursor-pointer"><input id="user-new-l1" type="checkbox" checked class="accent-teal-600" />L1</label>
+                <label class="inline-flex items-center gap-1 cursor-pointer"><input id="user-new-l2" type="checkbox" checked class="accent-teal-600" />L2</label>
+                <label class="inline-flex items-center gap-1 cursor-pointer"><input id="user-new-l3" type="checkbox" checked class="accent-teal-600" />L3</label>
+              </div>
+            </div>
+            <button type="submit" class="px-4 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-xs font-mono-tabular font-bold uppercase text-white shadow-sm transition">
+              Add User
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Right Column (5 cols): Telegram Alerts Config Panel -->
+      <div class="xl:col-span-5 hmi-panel overflow-hidden flex flex-col">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            Telegram Alerts
+          </h3>
+          <label class="inline-flex items-center gap-2 text-xs font-mono-tabular font-bold text-teal-800 cursor-pointer">
+            <input id="tg-enabled" type="checkbox" class="accent-teal-600 w-4 h-4 rounded" />
+            <span>Enable</span>
+          </label>
+        </div>
+        <form id="form-telegram-config" class="p-5 space-y-4 font-mono-tabular text-xs flex-1 flex flex-col justify-between">
+          <div class="space-y-3.5">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label for="tg-bot-token" class="block text-[10px] font-bold uppercase text-slate-500 mb-1">Bot Token</label>
+                <input
+                  id="tg-bot-token"
+                  type="password"
+                  placeholder="123456:ABC-DEF..."
+                  class="w-full rounded-lg bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+                />
+              </div>
+              <div>
+                <label for="tg-chat-id" class="block text-[10px] font-bold uppercase text-slate-500 mb-1">Chat ID</label>
+                <input
+                  id="tg-chat-id"
+                  type="text"
+                  placeholder="-100123456789"
+                  class="w-full rounded-lg bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+                />
+              </div>
+            </div>
+            <div>
+              <label for="tg-cooldown" class="block text-[10px] font-bold uppercase text-slate-500 mb-1">Cooldown (sec)</label>
+              <input
+                id="tg-cooldown"
+                type="number"
+                min="5"
+                step="5"
+                value="60"
+                class="w-full sm:w-40 rounded-lg bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+              />
+            </div>
+            <div class="hmi-subcard p-3 text-[11px] text-slate-600 space-y-1">
+              <p class="font-bold text-teal-800 uppercase text-[10px]">Auto-Alert Triggers</p>
+              <p>OVER TEMP • FORCED ENTRY • FAN FAULT • NODE OFFLINE • E-STOP</p>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-2.5 pt-2">
+            <button
+              type="submit"
+              class="flex-1 py-2 px-3 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold uppercase shadow-sm transition"
+            >
+              Save
+            </button>
+            <button
+              id="btn-tg-send-test"
+              type="button"
+              class="flex-1 py-2 px-3 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-800 font-bold uppercase transition"
+            >
+              Send Test
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <!-- ======================================================================
+       PAGE 5: SIMULATOR — HEARTBEAT & HARDWARE FAULT TEST BENCH (ADMIN ONLY)
+       ====================================================================== -->
+  <main id="view-simulator" class="hidden max-w-[1600px] mx-auto px-4 lg:px-6 py-5 space-y-5">
+
+    <div class="hmi-panel px-5 py-3.5 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-2.5">
+        <span class="px-2.5 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-[10px] font-mono-tabular font-bold uppercase">
+          TEST BENCH
+        </span>
+        <h2 class="text-base font-extrabold uppercase tracking-wide text-slate-900">
+          Simulator
+        </h2>
+      </div>
+      <button
+        id="btn-sim-back-dashboard"
+        type="button"
+        class="px-3.5 py-1.5 rounded-full bg-white hover:bg-teal-50 border border-slate-200 text-xs font-mono-tabular font-bold text-teal-800 uppercase shadow-sm transition"
+      >
+        ← Overview
+      </button>
+    </div>
+
+    <section class="grid grid-cols-1 xl:grid-cols-12 gap-5 items-stretch" aria-label="Simulator Controls">
+
+      <!-- Left Card (4 cols): Heartbeat Simulator & Node Connectivity -->
+      <div class="xl:col-span-4 hmi-panel overflow-hidden flex flex-col justify-between">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            Heartbeat &amp; Nodes
+          </h3>
+          <span class="px-2.5 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-[10px] font-mono-tabular font-bold">
+            WATCHDOG
+          </span>
+        </div>
+
+        <div class="p-5 space-y-4 font-mono-tabular text-xs flex-1 flex flex-col justify-between">
+          <div class="hmi-subcard p-4 space-y-3">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-slate-700 font-bold uppercase">Heartbeat Sim</span>
+              <button
+                id="btn-toggle-hb-sim"
+                type="button"
+                class="px-3.5 py-1.5 rounded-full bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-800 text-xs font-mono-tabular font-bold uppercase transition"
+              >
+                HB Sim: OFF
+              </button>
+            </div>
+            <p class="text-[11px] text-slate-500">
+              Keep all 3 locker nodes online without physical ESP32 heartbeat packets.
+            </p>
+          </div>
+
+          <div class="hmi-subcard p-4 space-y-2.5">
+            <span class="text-slate-700 font-bold uppercase block">Target Node State</span>
+            <div class="grid grid-cols-2 gap-2">
+              <button id="btn-sim-offline-node" type="button" class="py-2 px-3 rounded-xl bg-red-50 hover:bg-red-100 border border-red-300 text-red-800 font-bold uppercase transition">
+                Set Offline
+              </button>
+              <button id="btn-sim-online-node" type="button" class="py-2 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold uppercase transition">
+                Set Online
+              </button>
+            </div>
+          </div>
+
+          <div class="hmi-subcard p-4 space-y-2">
+            <span class="text-slate-700 font-bold uppercase block">Database Factory Reset</span>
+            <button id="btn-reset-rtdb-spec" type="button" class="w-full py-2 px-3 rounded-xl bg-white hover:bg-teal-50 border border-slate-300 text-teal-800 font-bold uppercase transition">
+              Reset Defaults
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Card (8 cols): Locker Actuator, Fault & Telemetry Simulator -->
+      <div class="xl:col-span-8 hmi-panel overflow-hidden flex flex-col justify-between">
+        <div class="hmi-panel-header px-5 py-3 flex items-center justify-between">
+          <h3 class="text-sm font-extrabold uppercase tracking-wide text-slate-900">
+            Locker &amp; Fault Triggers
+          </h3>
+          <span class="px-2.5 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-[10px] font-mono-tabular font-bold">
+            TEST BENCH
+          </span>
+        </div>
+
+        <div class="p-5 space-y-4 font-mono-tabular text-xs flex-1 flex flex-col justify-between">
+          <div class="hmi-subcard p-4 flex flex-wrap items-center justify-between gap-3">
+            <span class="text-slate-700 font-bold uppercase">Target Locker</span>
+            <select id="sim-locker-id" class="bg-white border border-[#DCEAF0] rounded-xl px-3.5 py-2 text-xs font-bold text-teal-800">
+              <option value="locker_1">Locker 01 (ESP 1)</option>
+              <option value="locker_2">Locker 02 (ESP 2)</option>
+              <option value="locker_3">Locker 03 (ESP 3)</option>
+            </select>
+          </div>
+
+          <div class="hmi-subcard p-4 space-y-3">
+            <span class="text-slate-700 font-bold uppercase block">Door &amp; Thermal Events</span>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <button id="btn-sim-open-door" type="button" class="px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 font-bold uppercase transition">
+                Door Open
+              </button>
+              <button id="btn-sim-close-door" type="button" class="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold uppercase transition">
+                Door Close
+              </button>
+              <button id="btn-sim-overtemp" type="button" class="px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 border border-red-300 text-red-900 font-bold uppercase transition">
+                High Temp
+              </button>
+              <button id="btn-sim-normal-temp" type="button" class="px-3 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-300 text-teal-900 font-bold uppercase transition">
+                Normal Temp
+              </button>
+            </div>
+
+            <span class="text-slate-700 font-bold uppercase block pt-1">V2 Diagnostics &amp; Expiry</span>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <button id="btn-sim-fan-fault" type="button" class="px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 border border-red-300 text-red-800 font-bold uppercase transition">
+                Fan Fault
+              </button>
+              <button id="btn-sim-forced-entry" type="button" class="px-3 py-2 rounded-xl bg-red-50 hover:bg-red-100 border border-red-300 text-red-800 font-bold uppercase transition">
+                Forced Entry
+              </button>
+              <button id="btn-sim-expired" type="button" class="px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 font-bold uppercase transition">
+                Set Expired
+              </button>
+              <button id="btn-sim-clear-faults" type="button" class="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold uppercase transition">
+                Clear Faults
+              </button>
+            </div>
+          </div>
+
+          <div class="hmi-subcard p-4 space-y-2.5">
+            <span class="text-slate-700 font-bold uppercase block">Manual DHT22 Telemetry</span>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-[10px] text-slate-500 block mb-1 uppercase font-bold">Temp (°C)</label>
+                <input id="sim-input-temp" type="number" step="0.1" value="25.2" class="w-full rounded-xl bg-white border border-[#DCEAF0] px-3 py-2 text-slate-900 font-bold" />
+              </div>
+              <div>
+                <label class="text-[10px] text-slate-500 block mb-1 uppercase font-bold">Humidity (%)</label>
+                <input id="sim-input-hum" type="number" step="0.5" value="58.0" class="w-full rounded-xl bg-white border border-[#DCEAF0] px-3 py-2 text-slate-900 font-bold" />
+              </div>
+              <div class="flex items-end">
+                <button id="btn-sim-send-dht" type="button" class="w-full py-2 px-3 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-bold uppercase shadow-sm transition">
+                  Apply
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- ======================================================================
+       PAGE 3: MANDATORY INVENTORY MODAL (HARD INTERLOCK)
+       ====================================================================== -->
+  <div
+    id="inventory-modal"
+    class="hidden fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4 select-none"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="inv-modal-title"
+  >
+    <div id="inventory-modal-box" class="w-full max-w-lg rounded-2xl overflow-hidden bg-white border-2 border-teal-500 shadow-2xl">
+      <!-- Flashing Ignored Warning Banner -->
+      <div
+        id="inv-ignored-banner"
+        class="hidden interlock-warning-banner px-4 py-2.5 font-mono-tabular text-xs font-bold uppercase tracking-wide text-center border-b-2"
+      >
+        Required: Submit inventory update to continue.
+      </div>
+
+      <!-- Modal Header (NO CLOSE BUTTON) -->
+      <div class="bg-gradient-to-r from-teal-50 to-emerald-50 border-b border-teal-200 px-6 py-3.5 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+            <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <rect x="3" y="11" width="18" height="11" rx="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 9.9-1"></path>
+            </svg>
+          </div>
+          <h3 id="inv-modal-title" class="text-base font-extrabold uppercase tracking-wide text-slate-900">
+            Inventory Update
+          </h3>
+        </div>
+        <span id="inv-idle-timer" class="px-2.5 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-xs font-mono-tabular font-bold text-amber-800">
+          15s
+        </span>
+      </div>
+
+      <!-- Form -->
+      <form id="form-inventory-interlock" class="p-6 space-y-4">
+        <div class="grid grid-cols-3 gap-3 bg-[#F3F8FA] border border-[#E2EEF3] rounded-xl p-3 font-mono-tabular text-xs">
+          <div>
+            <span class="text-[10px] text-slate-500 block uppercase font-semibold">Locker</span>
+            <strong id="inv-locker-name" class="text-slate-900 text-sm">Locker 01</strong>
+            <span id="inv-batch-exp" class="block text-[10px] text-slate-500 mt-0.5">Batch --</span>
+          </div>
+          <div>
+            <span class="text-[10px] text-slate-500 block uppercase font-semibold">Item</span>
+            <strong id="inv-medicine-name" class="text-teal-700 text-sm">--</strong>
+          </div>
+          <div class="text-right">
+            <span class="text-[10px] text-slate-500 block uppercase font-semibold">Stock</span>
+            <strong id="inv-current-stock" class="text-emerald-700 text-base">0</strong>
+          </div>
+        </div>
+
+        <!-- Expired Block Notice (Shown when item is EXPIRED) -->
+        <div id="inv-expired-notice" class="hidden rounded-xl bg-red-50 border border-red-300 px-3.5 py-2 text-xs font-mono-tabular font-bold text-red-700">
+          EXPIRED — Withdraw Blocked (Operator)
+        </div>
+
+        <!-- Action Selector -->
+        <div class="grid grid-cols-3 gap-2.5 font-mono-tabular text-xs">
+          <label id="inv-withdraw-label" class="cursor-pointer">
+            <input id="inv-radio-withdraw" type="radio" name="inv_action" value="WITHDRAW" checked class="peer sr-only" />
+            <div class="rounded-xl border border-slate-200 bg-[#F3F8FA] p-2.5 text-center text-slate-700 peer-checked:border-amber-500 peer-checked:bg-amber-50 peer-checked:text-amber-900 peer-disabled:opacity-40 peer-disabled:cursor-not-allowed font-bold transition">
+              Withdraw (-)
+            </div>
+          </label>
+          <label class="cursor-pointer">
+            <input id="inv-radio-restock" type="radio" name="inv_action" value="RESTOCK" class="peer sr-only" />
+            <div class="rounded-xl border border-slate-200 bg-[#F3F8FA] p-2.5 text-center text-slate-700 peer-checked:border-emerald-500 peer-checked:bg-emerald-50 peer-checked:text-emerald-900 font-bold transition">
+              Restock (+)
+            </div>
+          </label>
+          <label class="cursor-pointer">
+            <input id="inv-radio-inspect" type="radio" name="inv_action" value="INSPECT" class="peer sr-only" />
+            <div class="rounded-xl border border-slate-200 bg-[#F3F8FA] p-2.5 text-center text-slate-700 peer-checked:border-teal-500 peer-checked:bg-teal-50 peer-checked:text-teal-900 font-bold transition">
+              Inspect (0)
+            </div>
+          </label>
+        </div>
+
+        <!-- Qty + Quick Increment -->
+        <div id="inv-qty-group" class="space-y-1.5">
+          <div class="flex items-center justify-between">
+            <label for="inv-quantity" class="text-xs font-mono-tabular uppercase text-slate-700 font-bold">
+              Qty
+            </label>
+            <span id="inv-stock-preview" class="text-xs font-mono-tabular font-bold text-teal-700">Stock: --</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <input
+              id="inv-quantity"
+              type="number"
+              min="1"
+              step="1"
+              value="1"
+              required
+              class="w-24 rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3 py-2 text-base font-mono-tabular font-extrabold text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+            />
+            <div class="flex flex-wrap items-center gap-1.5 flex-1 font-mono-tabular text-xs">
+              <button type="button" data-qty-add="1" class="inv-qty-btn px-3 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 font-bold text-teal-800 transition">+1</button>
+              <button type="button" data-qty-add="5" class="inv-qty-btn px-3 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 font-bold text-teal-800 transition">+5</button>
+              <button type="button" data-qty-add="10" class="inv-qty-btn px-3 py-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 font-bold text-teal-800 transition">+10</button>
+              <button type="button" data-qty-reset="1" class="inv-qty-btn px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 font-semibold text-slate-700 transition">Reset</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Note -->
+        <div>
+          <label for="inv-notes" class="block text-xs font-mono-tabular uppercase text-slate-700 mb-1 font-bold">
+            Note
+          </label>
+          <input
+            id="inv-notes"
+            type="text"
+            placeholder="Optional (Required for Inspect)"
+            class="w-full rounded-xl bg-[#F3F8FA] border border-[#DCEAF0] px-3.5 py-2 text-xs font-mono-tabular text-slate-900 focus:outline-none focus:border-teal-500 focus:bg-white"
+          />
+        </div>
+
+        <div id="inv-error-msg" class="hidden rounded-xl bg-red-50 border border-red-300 px-3.5 py-2 text-xs font-mono-tabular font-semibold text-red-700"></div>
+
+        <button
+          type="submit"
+          class="w-full py-2.5 rounded-xl bg-gradient-to-r from-teal-600 to-teal-500 hover:from-teal-700 hover:to-teal-600 text-white font-mono-tabular font-bold text-xs uppercase tracking-wider shadow-md shadow-teal-600/20 transition"
+        >
+          Confirm
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       E-STOP CONFIRMATION MODAL
+       ====================================================================== -->
+  <div
+    id="estop-modal"
+    class="hidden fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="estop-modal-title"
+  >
+    <div class="w-full max-w-sm rounded-2xl overflow-hidden bg-white border-2 border-red-400 shadow-2xl">
+      <div class="bg-red-50 border-b border-red-200 px-5 py-3.5">
+        <h3 id="estop-modal-title" class="text-sm font-extrabold text-red-800 uppercase tracking-wide font-mono-tabular">
+          Confirm E-STOP
+        </h3>
+      </div>
+      <div class="px-5 py-4 text-xs font-mono-tabular text-slate-700">
+        <p id="estop-modal-desc">Engage E-STOP and lock all actuators?</p>
+      </div>
+      <div class="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5">
+        <button
+          id="estop-modal-cancel"
+          type="button"
+          class="px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 text-xs font-mono-tabular font-semibold uppercase text-slate-700"
+        >
+          Cancel
+        </button>
+        <button
+          id="estop-modal-confirm"
+          type="button"
+          class="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-xs font-mono-tabular font-bold uppercase text-white shadow-sm"
+        >
+          Confirm
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Optional Local Firebase Config (Ignored by Git; falls back to Interactive Demo Mode on GitHub Pages) -->
+  <script src="./js/firebase-config.js" onerror="window.__FIREBASE_CONFIG_MISSING__=true"></script>
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

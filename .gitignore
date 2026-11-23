@@ -1,0 +1,32 @@
+# Secrets & local configuration (NEVER commit)
+secrets.h
+**/secrets.h
+public/js/firebase-config.js
+.firebaserc
+.env
+.env.local
+.env.*.local
+
+# Internal academic dossier & private design specs (keep locally only)
+JOURNAL_TECHNICAL_DOSSIER.md
+DESIGN_SPEC.md
+UPGRADE_SPEC_V2.md
+
+# Temporary seeding & database patch scripts
+seed*.js
+seed*.json
+*patch*.json
+scripts/seed*
+
+# Dependencies & build artifacts
+node_modules/
+.firebase/
+*.log
+firebase-debug.log
+firebase-debug.*.log
+ui-debug.log
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/

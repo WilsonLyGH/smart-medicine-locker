@@ -5,8 +5,16 @@
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
+  getAuth,
+  signInAnonymously,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import {
   getDatabase,
   ref as fbRef,
+  get as fbGet,
   onValue as fbOnValue,
   set as fbSet,
   update as fbUpdate,
@@ -36,6 +44,7 @@ const hasRealFirebaseConfig = Boolean(
 const isDemoMode = forceDemoParam || !hasRealFirebaseConfig;
 const isFirebaseConfigured = !isDemoMode && hasRealFirebaseConfig;
 const firebaseApp = isFirebaseConfigured ? initializeApp(rawFirebaseConfig) : null;
+const auth = isFirebaseConfigured ? getAuth(firebaseApp) : null;
 const db = isFirebaseConfigured ? getDatabase(firebaseApp) : null;
 
 const STORAGE_AUTH_KEY = "scada_local_session";
@@ -134,7 +143,7 @@ const state = {
     global_alarm: false,
     telegram: { enabled: false, bot_token: "", chat_id: "", cooldown_sec: 60 }
   },
-  users: structuredClone(DEFAULT_SPEC_DATA.users),
+  users: isDemoMode ? structuredClone(DEFAULT_SPEC_DATA.users) : {},
   medicineCatalog: structuredClone(DEFAULT_SPEC_DATA.medicine_catalog),
   lockers: {
     locker_1: structuredClone(DEFAULT_SPEC_DATA.lockers.locker_1),
@@ -472,6 +481,14 @@ function onValue(refObj, callback) {
   return fbOnValue(refObj, callback);
 }
 
+async function get(refObj) {
+  if (isDemoMode) {
+    const val = structuredClone(demoGetAtPath(refObj.path));
+    return { val: () => val, exists: () => val !== null && val !== undefined };
+  }
+  return fbGet(refObj);
+}
+
 async function set(refObj, value) {
   if (isDemoMode) {
     demoSetRawAtPath(refObj.path, value);
@@ -727,6 +744,19 @@ function formatFilenameStamp(ts = Date.now()) {
 
 function isMonitoringUser() {
   return String(state.currentUser?.role || "").toLowerCase() === "monitoring";
+}
+
+function canWriteOperationalRtdb() {
+  if (isDemoMode) return true;
+  if (!isFirebaseConfigured || !auth?.currentUser || auth.currentUser.isAnonymous) return false;
+  if (!state.currentUser || isMonitoringUser()) return false;
+  return String(auth.currentUser.email || "").toLowerCase() !== "public@locker.local";
+}
+
+function canWriteAdminOrSensorRtdb() {
+  if (isDemoMode) return true;
+  if (!isFirebaseConfigured || !auth?.currentUser || auth.currentUser.isAnonymous) return false;
+  return String(state.currentUser?.role || "").toLowerCase() === "admin";
 }
 
 function showToast(msg, isError = false) {
@@ -1260,7 +1290,13 @@ function startRfidCardEnrollment() {
     if (!isEnrollingCard) return;
 
     el.userNewUid.value = scanUid;
-    const alreadyRegistered = Boolean(state.users && state.users[scanUid]);
+    const alreadyRegistered = Boolean(
+      state.users &&
+        (state.users[scanUid] ||
+          Object.values(state.users).some(
+            (u) => String(u?.rfid_uid || "").trim().toUpperCase() === scanUid.toUpperCase()
+          ))
+    );
 
     if (alreadyRegistered) {
       stopRfidCardEnrollment("UID Already Registered", "warn");
@@ -1334,19 +1370,112 @@ function clearSession() {
   LOCKER_IDS.forEach((id) => disarmLockerUnlock(id, false));
 }
 
-function handleRfidUidLoginAttempt(uid) {
+async function ensureAnonymousLoginScreenAuth() {
+  if (!isFirebaseConfigured || !auth) return;
+  if (auth.currentUser) return;
+  try {
+    await signInAnonymously(auth);
+  } catch (_) {}
+}
+
+async function resolveAndCompleteFirebaseLogin(fbUser, announceLogin = true) {
+  if (!isFirebaseConfigured || !fbUser || fbUser.isAnonymous) return;
+
+  const email = String(fbUser.email || "").trim().toLowerCase();
+  const usernameFromEmail = email.includes("@") ? email.split("@")[0] : email;
+
+  // Special case: public@locker.local -> forced monitoring (read-only) without reading /system/telegram
+  const isPublicEmail = email === "public@locker.local" || usernameFromEmail === "public";
+
+  let usersMap = {};
+  try {
+    const snap = await get(ref(db, "users"));
+    usersMap = snap.val() || {};
+    state.users = usersMap;
+  } catch (_) {
+    usersMap = state.users || {};
+  }
+
+  const matchedEntry = Object.entries(usersMap).find(
+    ([, u]) => String(u?.username || "").trim().toLowerCase() === usernameFromEmail
+  );
+
+  if (matchedEntry && matchedEntry[1]?.active === false) {
+    clearSession();
+    await signOut(auth).catch(() => {});
+    playAlertBeep(360, 300);
+    el.loginAlert.textContent = "Access Denied: Account is disabled.";
+    el.loginAlert.classList.remove("hidden");
+    return;
+  }
+
+  const profileKey = matchedEntry ? matchedEntry[0] : isPublicEmail ? "USER_PUBLIC" : fbUser.uid;
+  const rawRec = matchedEntry ? matchedEntry[1] : null;
+  const resolvedRole = isPublicEmail
+    ? "monitoring"
+    : String(rawRec?.role || "operator").trim().toLowerCase();
+
+  const resolvedUserRec = {
+    name: rawRec?.name || (isPublicEmail ? "Public Monitoring" : usernameFromEmail),
+    username: rawRec?.username || usernameFromEmail,
+    role: resolvedRole,
+    rfid_uid: rawRec?.rfid_uid || "",
+    active: true,
+    allowed_lockers:
+      isPublicEmail || resolvedRole === "monitoring"
+        ? { locker_1: false, locker_2: false, locker_3: false }
+        : resolvedRole === "admin"
+          ? { locker_1: true, locker_2: true, locker_3: true }
+          : rawRec?.allowed_lockers || { locker_1: true, locker_2: true, locker_3: true }
+  };
+
+  attachProtectedUserListeners(resolvedRole === "admin" && !isPublicEmail);
+  loginWithUser(profileKey, resolvedUserRec, announceLogin);
+}
+
+async function handleRfidUidLoginAttempt(uid) {
   if (state.currentUser || state.currentView !== "login") return;
   const cleanUid = String(uid || "").trim();
   if (!cleanUid) return;
 
   el.loginLastRfid.textContent = cleanUid;
-  const matchedUser = state.users[cleanUid];
-  if (matchedUser && matchedUser.active !== false) {
+
+  if (isDemoMode) {
+    const matchedDemo =
+      state.users[cleanUid] ||
+      Object.values(state.users).find((u) => String(u?.rfid_uid || "").toUpperCase() === cleanUid.toUpperCase());
+    if (matchedDemo && matchedDemo.active !== false) {
+      playAlertBeep(1040, 150);
+      loginWithUser(cleanUid, matchedDemo, true);
+    } else {
+      playAlertBeep(360, 350);
+      el.loginAlert.textContent = `Access Denied: Unregistered UID (${cleanUid})`;
+      el.loginAlert.classList.remove("hidden");
+      showToast(`Access Denied (${cleanUid})`, true);
+    }
+    return;
+  }
+
+  try {
+    await ensureAnonymousLoginScreenAuth();
+    const credSnap = await get(ref(db, `rfid_auth/${cleanUid}`));
+    const cred = credSnap.val();
+    if (!cred || !cred.email || !cred.password) {
+      playAlertBeep(360, 350);
+      el.loginAlert.textContent = `Access Denied: Unregistered UID (${cleanUid})`;
+      el.loginAlert.classList.remove("hidden");
+      showToast(`Access Denied (${cleanUid})`, true);
+      return;
+    }
+
+    const userCred = await signInWithEmailAndPassword(auth, String(cred.email).trim(), String(cred.password));
+    // Now authenticated as non-anonymous user -> mark rfid_scan processed
+    await update(ref(db, "auth/rfid_scan"), { processed: true }).catch(() => {});
     playAlertBeep(1040, 150);
-    loginWithUser(cleanUid, matchedUser);
-  } else {
+    await resolveAndCompleteFirebaseLogin(userCred.user, true);
+  } catch (_) {
     playAlertBeep(360, 350);
-    el.loginAlert.textContent = `Access Denied: Unregistered UID (${cleanUid})`;
+    el.loginAlert.textContent = `Access Denied: RFID Auth Failed (${cleanUid})`;
     el.loginAlert.classList.remove("hidden");
     showToast(`Access Denied (${cleanUid})`, true);
   }
@@ -1362,6 +1491,7 @@ function detachRfidLoginListener() {
 
 function attachRfidLoginListener() {
   if (!isFirebaseConfigured) return;
+  if (!auth?.currentUser) return;
   if (state.currentUser || state.currentView !== "login") {
     detachRfidLoginListener();
     return;
@@ -1372,7 +1502,7 @@ function attachRfidLoginListener() {
   let baselineScanStamp = null;
 
   rfidScanUnsubscribe = onValue(ref(db, "auth/rfid_scan"), async (snap) => {
-    // Strict Guard: Never process RFID login if this device is already authenticated
+    // Strict Guard: Never process RFID login if this device is already authenticated as a user
     if (state.currentUser || state.currentView !== "login") {
       detachRfidLoginListener();
       return;
@@ -1393,7 +1523,7 @@ function attachRfidLoginListener() {
       isInitialSnapshot = false;
       baselineScanStamp = scanStamp;
       if (scanUid) el.loginLastRfid.textContent = scanUid;
-      if (scan.processed === false && Date.now() >= state.authEnrollUntil) {
+      if (scan.processed === false && Date.now() >= state.authEnrollUntil && canWriteOperationalRtdb()) {
         update(ref(db, "auth/rfid_scan"), { processed: true }).catch(() => {});
       }
       return;
@@ -1415,9 +1545,8 @@ function attachRfidLoginListener() {
     rfidClaimInProgress = true;
 
     try {
-      await update(ref(db, "auth/rfid_scan"), { processed: true });
       if (state.currentUser || state.currentView !== "login") return;
-      handleRfidUidLoginAttempt(scanUid);
+      await handleRfidUidLoginAttempt(scanUid);
     } catch (_) {
     } finally {
       rfidClaimInProgress = false;
@@ -1425,7 +1554,7 @@ function attachRfidLoginListener() {
   });
 }
 
-function loginWithUser(uid, userRec) {
+function loginWithUser(uid, userRec, announceToast = true) {
   detachRfidLoginListener();
   const sessionUser = {
     uid,
@@ -1438,7 +1567,9 @@ function loginWithUser(uid, userRec) {
   saveSession(sessionUser);
   el.loginAlert.classList.add("hidden");
   navigateToView("dashboard");
-  showToast(`Signed in: ${sessionUser.name} (${sessionUser.role.toUpperCase()})`);
+  if (announceToast) {
+    showToast(`Signed in: ${sessionUser.name} (${sessionUser.role.toUpperCase()})`);
+  }
   renderDashboardLockers();
   restorePendingInterlockIfAny();
 }
@@ -1496,7 +1627,7 @@ function navigateToView(targetView, focusCatalog = false) {
   if (el.estopBannerReleaseBtn) el.estopBannerReleaseBtn.classList.toggle("hidden", isMonitoring);
   if (el.btnKpiAckAll) el.btnKpiAckAll.classList.toggle("hidden", isMonitoring);
   if (el.btnAckAllAlarms) el.btnAckAllAlarms.classList.toggle("hidden", isMonitoring);
-  if (el.btnLogSnapshotNow) el.btnLogSnapshotNow.classList.toggle("hidden", isMonitoring);
+  if (el.btnLogSnapshotNow) el.btnLogSnapshotNow.classList.toggle("hidden", !isAdmin && !isDemoMode);
 
   const activePill = "px-3.5 py-1 rounded-full text-xs font-mono-tabular font-bold uppercase bg-teal-600 text-white shadow-sm transition";
   const idlePill = "px-3.5 py-1 rounded-full text-xs font-mono-tabular font-semibold uppercase bg-white text-slate-600 hover:bg-teal-50 hover:text-teal-700 border border-slate-200 transition";
@@ -1902,7 +2033,7 @@ async function evaluateLockerAlarms(lockerId) {
     fanFault !== Boolean(curAlarm.fan_fault) ||
     expiredMed !== Boolean(curAlarm.expired_med);
 
-  if (hasChanged) {
+  if (hasChanged && canWriteOperationalRtdb()) {
     const anyActive = overTemp || highHum || lowStock || doorLeftOpen || fanFault || forcedEntry || expiredMed;
     const nextAck = newlyTriggered ? false : anyActive ? Boolean(curAlarm.acknowledged) : true;
     try {
@@ -1944,6 +2075,7 @@ async function evaluateLockerAlarms(lockerId) {
 }
 
 async function triggerForcedEntryAlarm(lockerId) {
+  if (!canWriteOperationalRtdb()) return;
   const locker = state.lockers[lockerId];
   const lockerLabel = locker?.meta?.name || lockerId.toUpperCase();
   try {
@@ -2022,7 +2154,7 @@ async function acknowledgeAllAlarms() {
 // Historical Logging (Every 5 Min to /history/locker_X, Max 288 Samples)
 // ============================================================================
 async function logHistorySnapshots(manualTrigger = false) {
-  if (!state.connected || isMonitoringUser()) return;
+  if (!state.connected || !canWriteAdminOrSensorRtdb()) return;
   const epochSec = String(Math.floor(Date.now() / 1000));
   const eStop = Boolean(state.system.emergency_stop);
 
@@ -2931,8 +3063,9 @@ function renderUsersAdmin() {
 
     const tr = document.createElement("tr");
     tr.className = "hover:bg-teal-50/40";
+    const uidDisplay = u.rfid_uid ? `${uid} (${u.rfid_uid})` : uid;
     tr.innerHTML = `
-      <td class="py-2 px-3 font-bold text-teal-700 whitespace-nowrap">${uid}</td>
+      <td class="py-2 px-3 font-bold text-teal-700 whitespace-nowrap">${uidDisplay}</td>
       <td class="py-2 px-2 font-semibold text-slate-900 whitespace-nowrap">${u.name || "--"}${
         isSelf ? ' <span class="ml-1 px-1.5 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-[9px] font-bold text-teal-700">YOU</span>' : ""
       }</td>
@@ -3311,10 +3444,113 @@ function exportComplianceReportXlsx() {
 }
 
 // ============================================================================
-// Firebase Realtime Database Listeners
+// Firebase Realtime Database Listeners (Role & Rule-Aware)
 // ============================================================================
+let publicRtdbListenersAttached = false;
+let usersRtdbUnsubscribe = null;
+let telegramRtdbUnsubscribe = null;
+
+function detachProtectedUserListeners() {
+  if (typeof usersRtdbUnsubscribe === "function") {
+    usersRtdbUnsubscribe();
+    usersRtdbUnsubscribe = null;
+  }
+  if (typeof telegramRtdbUnsubscribe === "function") {
+    telegramRtdbUnsubscribe();
+    telegramRtdbUnsubscribe = null;
+  }
+  state.tgFormHydrated = false;
+}
+
+function attachProtectedUserListeners(canReadTelegram = false) {
+  if (!isFirebaseConfigured && !isDemoMode) return;
+
+  if (typeof usersRtdbUnsubscribe !== "function") {
+    usersRtdbUnsubscribe = onValue(ref(db, "users"), (snap) => {
+      state.users = snap.val() || {};
+      // Sync only the local user's own permissions/role without ever switching user session
+      if (state.currentUser && state.currentUser.uid) {
+        const liveSelf = state.users[state.currentUser.uid];
+        if (!liveSelf && Object.keys(state.users).length > 0 && isDemoMode) {
+          clearSession();
+          navigateToView("login");
+          showToast("Session ended: Account removed.", true);
+        } else if (liveSelf) {
+          if (liveSelf.active === false) {
+            clearSession();
+            if (isFirebaseConfigured && auth) {
+              signOut(auth).catch(() => {});
+            }
+            navigateToView("login");
+            showToast("Session ended: Account disabled.", true);
+          } else {
+            const isPublicAcct =
+              String(auth?.currentUser?.email || "").toLowerCase() === "public@locker.local" ||
+              String(liveSelf.username || "").toLowerCase() === "public";
+            const prevRole = state.currentUser.role;
+            const nextRole = isPublicAcct
+              ? "monitoring"
+              : String(liveSelf.role || state.currentUser.role).toLowerCase();
+            saveSession({
+              ...state.currentUser,
+              name: liveSelf.name || state.currentUser.name,
+              role: nextRole,
+              allowed_lockers: isPublicAcct
+                ? { locker_1: false, locker_2: false, locker_3: false }
+                : liveSelf.allowed_lockers || state.currentUser.allowed_lockers
+            });
+
+            if (prevRole !== nextRole) {
+              if (nextRole === "monitoring" && state.interlock.active) {
+                state.interlock.active = false;
+                state.interlock.lockerId = null;
+                clearInterval(state.interlock.timerId);
+                localStorage.removeItem(STORAGE_INTERLOCK_KEY);
+                el.inventoryModal.classList.add("hidden");
+              }
+              if (nextRole !== "admin" && typeof telegramRtdbUnsubscribe === "function") {
+                telegramRtdbUnsubscribe();
+                telegramRtdbUnsubscribe = null;
+              }
+              if (nextRole !== "admin" && (state.currentView === "admin" || state.currentView === "simulator")) {
+                navigateToView("dashboard");
+                showToast(`Role updated to ${nextRole.toUpperCase()} — redirected to Overview`, true);
+              } else {
+                navigateToView(state.currentView);
+                showToast(`Role updated: ${nextRole.toUpperCase()}`);
+              }
+            }
+          }
+        }
+      }
+      renderUsersAdmin();
+      renderDashboardLockers();
+    });
+  }
+
+  // Only Admin (or Demo Mode) reads /system/telegram — Operator & Public Monitoring NEVER read /system/telegram
+  if ((canReadTelegram || isDemoMode) && typeof telegramRtdbUnsubscribe !== "function") {
+    telegramRtdbUnsubscribe = onValue(ref(db, "system/telegram"), (snap) => {
+      const tg = snap.val();
+      if (!tg) return;
+      state.system.telegram = {
+        enabled: Boolean(tg.enabled),
+        bot_token: tg.bot_token || "",
+        chat_id: tg.chat_id || "",
+        cooldown_sec: Number(tg.cooldown_sec ?? 60)
+      };
+      if (!state.tgFormHydrated) {
+        hydrateTelegramForm();
+        state.tgFormHydrated = true;
+      }
+    });
+  }
+}
+
 function attachRtdbListeners() {
   if (!isFirebaseConfigured && !isDemoMode) return;
+  if (publicRtdbListenersAttached) return;
+  publicRtdbListenersAttached = true;
 
   onValue(ref(db, ".info/connected"), (snap) => renderConnectionStatus(snap.val() === true));
 
@@ -3322,72 +3558,19 @@ function attachRtdbListeners() {
     state.authEnrollUntil = Number(snap.val() || 0);
   });
 
-  onValue(ref(db, "system"), (snap) => {
-    const val = snap.val();
-    if (!val) return;
-    state.system = {
-      emergency_stop: Boolean(val.emergency_stop),
-      global_alarm: Boolean(val.global_alarm),
-      telegram: {
-        enabled: Boolean(val.telegram?.enabled),
-        bot_token: val.telegram?.bot_token || "",
-        chat_id: val.telegram?.chat_id || "",
-        cooldown_sec: Number(val.telegram?.cooldown_sec ?? 60)
-      }
-    };
-    if (!state.tgFormHydrated) {
-      hydrateTelegramForm();
-      state.tgFormHydrated = true;
-    }
+  onValue(ref(db, "system/emergency_stop"), (snap) => {
+    state.system.emergency_stop = Boolean(snap.val());
     renderDashboardLockers();
   });
 
-  onValue(ref(db, "users"), (snap) => {
-    state.users = snap.val() || {};
-    // Sync only the local user's own permissions/role without ever switching user session
-    if (state.currentUser && state.currentUser.uid) {
-      const liveSelf = state.users[state.currentUser.uid];
-      if (!liveSelf && Object.keys(state.users).length > 0) {
-        clearSession();
-        navigateToView("login");
-        showToast("Session ended: Account removed.", true);
-      } else if (liveSelf) {
-        if (liveSelf.active === false) {
-          clearSession();
-          navigateToView("login");
-          showToast("Session ended: Account disabled.", true);
-        } else {
-          const prevRole = state.currentUser.role;
-          const nextRole = String(liveSelf.role || state.currentUser.role).toLowerCase();
-          saveSession({
-            ...state.currentUser,
-            name: liveSelf.name || state.currentUser.name,
-            role: nextRole,
-            allowed_lockers: liveSelf.allowed_lockers || state.currentUser.allowed_lockers
-          });
-
-          if (prevRole !== nextRole) {
-            if (nextRole === "monitoring" && state.interlock.active) {
-              state.interlock.active = false;
-              state.interlock.lockerId = null;
-              clearInterval(state.interlock.timerId);
-              localStorage.removeItem(STORAGE_INTERLOCK_KEY);
-              el.inventoryModal.classList.add("hidden");
-            }
-            if (nextRole !== "admin" && (state.currentView === "admin" || state.currentView === "simulator")) {
-              navigateToView("dashboard");
-              showToast(`Role updated to ${nextRole.toUpperCase()} — redirected to Overview`, true);
-            } else {
-              navigateToView(state.currentView);
-              showToast(`Role updated: ${nextRole.toUpperCase()}`);
-            }
-          }
-        }
-      }
-    }
-    renderUsersAdmin();
+  onValue(ref(db, "system/global_alarm"), (snap) => {
+    state.system.global_alarm = Boolean(snap.val());
     renderDashboardLockers();
   });
+
+  if (isDemoMode) {
+    attachProtectedUserListeners(true);
+  }
 
   onValue(ref(db, "medicine_catalog"), (snap) => {
     state.medicineCatalog = snap.val() || {};
@@ -3517,19 +3700,37 @@ function attachRtdbListeners() {
 // Event Bindings
 // ============================================================================
 function bindEvents() {
-  el.panelLoginManual.addEventListener("submit", (e) => {
+  el.panelLoginManual.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const uName = el.loginUsername.value.trim().toLowerCase();
+    const rawUser = el.loginUsername.value.trim().toLowerCase();
     const uPass = el.loginPassword.value;
-    const found = Object.entries(state.users).find(
-      ([, u]) =>
-        String(u.username || "").trim().toLowerCase() === uName &&
-        u.password === uPass &&
-        u.active !== false
-    );
-    if (found) {
-      loginWithUser(found[0], found[1]);
-    } else {
+    if (!rawUser || !uPass) return;
+
+    if (isDemoMode) {
+      const uName = rawUser.includes("@") ? rawUser.split("@")[0] : rawUser;
+      const found = Object.entries(state.users).find(
+        ([, u]) =>
+          String(u.username || "").trim().toLowerCase() === uName &&
+          u.password === uPass &&
+          u.active !== false
+      );
+      if (found) {
+        loginWithUser(found[0], found[1], true);
+      } else {
+        playAlertBeep(360, 300);
+        el.loginAlert.textContent = "Access Denied: Invalid credentials.";
+        el.loginAlert.classList.remove("hidden");
+      }
+      return;
+    }
+
+    const email = rawUser.includes("@") ? rawUser : `${rawUser}@locker.local`;
+    el.loginAlert.classList.add("hidden");
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email, uPass);
+      el.loginPassword.value = "";
+      await resolveAndCompleteFirebaseLogin(cred.user, true);
+    } catch (_) {
       playAlertBeep(360, 300);
       el.loginAlert.textContent = "Access Denied: Invalid credentials.";
       el.loginAlert.classList.remove("hidden");
@@ -3572,12 +3773,19 @@ function bindEvents() {
   el.btnBackDashboard.addEventListener("click", () => navigateToView("dashboard"));
   if (el.btnSimBackDashboard) el.btnSimBackDashboard.addEventListener("click", () => navigateToView("dashboard"));
 
-  el.btnLogout.addEventListener("click", () => {
+  el.btnLogout.addEventListener("click", async () => {
     if (state.interlock.active) {
       showInterlockIgnoredWarning();
       return;
     }
     clearSession();
+    if (isFirebaseConfigured && auth) {
+      detachProtectedUserListeners();
+      try {
+        await signOut(auth);
+      } catch (_) {}
+      await ensureAnonymousLoginScreenAuth();
+    }
     navigateToView("login");
   });
 
@@ -3737,7 +3945,9 @@ function bindEvents() {
       LOCKER_IDS.forEach((id) => {
         updates[`lockers/${id}/control/unlock_cmd`] = false;
         updates[`lockers/${id}/control/manual_pwm`] = 0;
-        updates[`lockers/${id}/pid/output_pwm`] = 0;
+        if (canWriteAdminOrSensorRtdb()) {
+          updates[`lockers/${id}/pid/output_pwm`] = 0;
+        }
       });
     }
     await update(ref(db), updates);
@@ -3864,33 +4074,79 @@ function bindEvents() {
       stopRfidCardEnrollment("", "info");
     }
     setEnrollStatusMessage("", "info");
-    const uid = el.userNewUid.value.trim();
-    if (!uid) return;
-    const role = el.userNewRole.value;
-    await set(ref(db, `users/${uid}`), {
-      name: el.userNewName.value.trim(),
-      username: el.userNewUsername.value.trim(),
-      password: el.userNewPassword.value,
-      role,
-      active: true,
-      allowed_lockers:
-        role === "admin"
-          ? { locker_1: true, locker_2: true, locker_3: true }
-          : role === "monitoring"
-            ? { locker_1: false, locker_2: false, locker_3: false }
-            : {
-                locker_1: el.userNewL1.checked,
-                locker_2: el.userNewL2.checked,
-                locker_3: el.userNewL3.checked
-              }
-    });
+    const rfidUid = el.userNewUid.value.trim().toUpperCase();
+    const fullName = el.userNewName.value.trim();
+    const cleanUsername = el.userNewUsername.value.trim().toLowerCase();
+    const rawPassword = el.userNewPassword.value;
+    if (!cleanUsername && !rfidUid) return;
+
+    const role = String(el.userNewRole.value || "operator").toLowerCase();
+    const allowedLockers =
+      role === "admin"
+        ? { locker_1: true, locker_2: true, locker_3: true }
+        : role === "monitoring"
+          ? { locker_1: false, locker_2: false, locker_3: false }
+          : {
+              locker_1: el.userNewL1.checked,
+              locker_2: el.userNewL2.checked,
+              locker_3: el.userNewL3.checked
+            };
+
+    const userKey = cleanUsername
+      ? `USER_${cleanUsername.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`
+      : rfidUid;
+
+    if (isDemoMode) {
+      await set(ref(db, `users/${userKey}`), {
+        name: fullName || cleanUsername || rfidUid,
+        username: cleanUsername || rfidUid.toLowerCase(),
+        password: rawPassword,
+        rfid_uid: rfidUid,
+        role,
+        active: true,
+        allowed_lockers: allowedLockers
+      });
+    } else {
+      // Production Mode: Register in Firebase Auth via REST (without displacing current Admin session),
+      // store profile in /users WITHOUT plaintext password, and map RFID UID in /rfid_auth/<UID>
+      const email = `${cleanUsername || rfidUid.toLowerCase()}@locker.local`;
+      if (rawPassword && rawFirebaseConfig?.apiKey) {
+        try {
+          await fetch(
+            `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(rawFirebaseConfig.apiKey)}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email, password: rawPassword, returnSecureToken: false })
+            }
+          );
+        } catch (_) {}
+      }
+
+      await set(ref(db, `users/${userKey}`), {
+        name: fullName || cleanUsername || rfidUid,
+        username: cleanUsername || rfidUid.toLowerCase(),
+        rfid_uid: rfidUid,
+        role,
+        active: true,
+        allowed_lockers: allowedLockers
+      });
+
+      if (rfidUid && rawPassword) {
+        await set(ref(db, `rfid_auth/${rfidUid}`), {
+          email,
+          password: rawPassword
+        });
+      }
+    }
+
     el.formAddUser.reset();
     [el.userNewL1, el.userNewL2, el.userNewL3].forEach((cb) => {
       if (!cb) return;
       cb.checked = true;
       cb.disabled = false;
     });
-    showToast(`Added RFID User: ${uid}`);
+    showToast(`Saved User: ${fullName || userKey}`);
   });
 
   // Admin: Telegram Alerts Save & Send Test
@@ -4050,17 +4306,32 @@ function bindEvents() {
 
   el.btnResetRtdbSpec.addEventListener("click", async () => {
     const nowSec = Math.floor(Date.now() / 1000);
-    const payload = structuredClone(DEFAULT_SPEC_DATA);
-    LOCKER_IDS.forEach((id) => {
-      payload.lockers[id].meta.heartbeat = nowSec;
-      demoForcedOffline[id] = false;
-    });
-    await update(ref(db), payload);
     if (isDemoMode) {
+      const payload = structuredClone(DEFAULT_SPEC_DATA);
+      LOCKER_IDS.forEach((id) => {
+        payload.lockers[id].meta.heartbeat = nowSec;
+        demoForcedOffline[id] = false;
+      });
+      await update(ref(db), payload);
       seedDemoModeInitialData();
       notifyDemoListeners("");
+      showToast("Demo State Reset to Defaults");
+      return;
     }
-    showToast("Database Reset to Defaults");
+
+    // Production Mode (Admin Only): NEVER overwrite /users, /rfid_auth, or /system/telegram with DEMO_* data!
+    if (!canWriteAdminOrSensorRtdb()) return;
+    const safeUpdates = {
+      "system/emergency_stop": false,
+      "system/global_alarm": false,
+      medicine_catalog: structuredClone(DEFAULT_SPEC_DATA.medicine_catalog),
+      lockers: structuredClone(DEFAULT_SPEC_DATA.lockers)
+    };
+    LOCKER_IDS.forEach((id) => {
+      safeUpdates.lockers[id].meta.heartbeat = nowSec;
+    });
+    await update(ref(db), safeUpdates);
+    showToast("Lockers & Catalog Reset to Spec Defaults");
   });
 }
 
@@ -4085,8 +4356,10 @@ function startSystemTimers() {
         String(locker?.meta?.status || "").toLowerCase() === "online"
       ) {
         locker.meta.status = "offline";
-        set(ref(db, `lockers/${id}/meta/status`), "offline").catch(() => {});
-        sendTelegramAlert(`${id}_offline`, `NODE OFFLINE: ${locker?.meta?.name || id.toUpperCase()} (Heartbeat timeout)`);
+        if (canWriteOperationalRtdb()) {
+          set(ref(db, `lockers/${id}/meta/status`), "offline").catch(() => {});
+          sendTelegramAlert(`${id}_offline`, `NODE OFFLINE: ${locker?.meta?.name || id.toUpperCase()} (Heartbeat timeout)`);
+        }
       }
     });
     renderDashboardLockers();
@@ -4131,15 +4404,47 @@ buildLockerCards();
 initPidChart();
 initReportChart();
 bindEvents();
-
-const savedUser = loadSavedSession();
-if (savedUser) {
-  state.currentUser = savedUser;
-  navigateToView("dashboard");
-} else {
-  navigateToView("login");
-}
-
-attachRtdbListeners();
 startSystemTimers();
-restorePendingInterlockIfAny();
+
+if (isDemoMode) {
+  const savedDemoUser = loadSavedSession();
+  if (savedDemoUser) {
+    state.currentUser = savedDemoUser;
+    navigateToView("dashboard");
+  } else {
+    navigateToView("login");
+  }
+  attachRtdbListeners();
+  restorePendingInterlockIfAny();
+} else if (isFirebaseConfigured && auth) {
+  // Start on Login screen until Firebase Auth confirms either a real user session or anonymous login screen session
+  navigateToView("login");
+  onAuthStateChanged(auth, async (fbUser) => {
+    if (!fbUser) {
+      detachProtectedUserListeners();
+      if (state.currentUser) {
+        clearSession();
+      }
+      navigateToView("login");
+      await ensureAnonymousLoginScreenAuth();
+      return;
+    }
+
+    // Attach base RTDB listeners once any Firebase Auth token (anonymous or user) is ready
+    attachRtdbListeners();
+
+    if (fbUser.isAnonymous) {
+      detachProtectedUserListeners();
+      if (state.currentUser) {
+        clearSession();
+      }
+      navigateToView("login");
+      attachRfidLoginListener();
+      return;
+    }
+
+    // Authenticated non-anonymous user (restored on refresh or just signed in)
+    const alreadyHadLocalSession = Boolean(state.currentUser);
+    await resolveAndCompleteFirebaseLogin(fbUser, !alreadyHadLocalSession);
+  });
+}

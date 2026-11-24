@@ -1,0 +1,77 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "lockers": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')",
+      "$lockerId": {
+        "sensor": {
+          ".write": "auth != null && (auth.token.email == 'esp32@locker.local' || auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')"
+        },
+        "pid": {
+          ".write": "auth != null && (auth.token.email == 'esp32@locker.local' || auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')"
+        },
+        "meta": {
+          ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+        },
+        "control": {
+          ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+        },
+        "alarm": {
+          ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+        }
+      }
+    },
+
+    "history": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.token.email == 'esp32@locker.local' || auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')"
+    },
+
+    "medicine_catalog": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')"
+    },
+
+    "logs": {
+      ".read": "auth != null",
+      ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+    },
+
+    "auth": {
+      ".read": "auth != null",
+      ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+    },
+
+    "rfid_auth": {
+      ".read": false,
+      ".write": "auth != null && (auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')",
+      "$uid": {
+        ".read": "auth != null"
+      }
+    },
+
+    "users": {
+      ".read": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous'",
+      ".write": "auth != null && (auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')"
+    },
+
+    "system": {
+      ".read": "auth != null && (auth.token.email == 'esp32@locker.local' || auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')",
+      "emergency_stop": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+      },
+      "global_alarm": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.token.firebase.sign_in_provider != 'anonymous' && auth.token.email != 'public@locker.local'"
+      },
+      "telegram": {
+        ".read": "auth != null && (auth.token.email == 'esp32@locker.local' || auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')",
+        ".write": "auth != null && (auth.token.email == 'ali@locker.local' || auth.token.email == 'naufal@locker.local')"
+      }
+    }
+  }
+}

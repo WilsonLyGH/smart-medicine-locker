@@ -24,22 +24,23 @@
  */
 
 // ============================================================================
-// 1. MODULAR NODE CONFIGURATION (CUKUP UBAH LOCKER_ID = 1, 2, ATAU 3)
+// 1. MODULAR NODE CONFIGURATION (CUKUP UBAH NODE_ID = 1, 2, ATAU 3)
 // ============================================================================
-#define LOCKER_ID   1        // 1 = ESP 1 (Locker 01 + Master RFID), 2 = ESP 2 (Locker 02 + OLED), 3 = ESP 3 (Locker 03)
+#define NODE_ID     1        // 1 = ESP 1 (Locker 01 + Master RFID), 2 = ESP 2 (Locker 02 + OLED), 3 = ESP 3 (Locker 03)
+#define LOCKER_ID   NODE_ID
 
-// Otomatis mengatur HAS_RFID & HAS_OLED berdasarkan LOCKER_ID agar tidak lupa saat pindah board:
-#if LOCKER_ID == 1
+// Otomatis mengatur HAS_RFID & HAS_OLED berdasarkan NODE_ID agar tidak lupa saat pindah board:
+#if NODE_ID == 1
   #define HAS_RFID  true     // ESP 1 (38-Pin): RFID RC522 Aktif
   #define HAS_OLED  false
-#elif LOCKER_ID == 2
+#elif NODE_ID == 2
   #define HAS_RFID  false
   #define HAS_OLED  true     // ESP 2 (30-Pin): OLED 0.96" I2C Aktif (GPIO 21/22)
-#elif LOCKER_ID == 3
+#elif NODE_ID == 3
   #define HAS_RFID  false
   #define HAS_OLED  false
 #else
-  #error "LOCKER_ID must be 1, 2, or 3"
+  #error "NODE_ID must be 1, 2, or 3"
 #endif
 
 #if HAS_RFID && HAS_OLED
@@ -59,6 +60,7 @@
 #include <time.h>
 #include <limits.h>
 #include <esp_timer.h>
+#include <esp_system.h>
 #include <soc/gpio_reg.h>
 
 #if HAS_RFID
@@ -95,6 +97,15 @@
 #endif
 #ifndef SECRET_FIREBASE_HOST
   #define SECRET_FIREBASE_HOST     "https://YOUR_PROJECT_ID-default-rtdb.YOUR_REGION.firebasedatabase.app"
+#endif
+#ifndef FIREBASE_API_KEY
+  #define FIREBASE_API_KEY         "YOUR_FIREBASE_WEB_API_KEY"
+#endif
+#ifndef ESP_AUTH_EMAIL
+  #define ESP_AUTH_EMAIL           "esp32@locker.local"
+#endif
+#ifndef ESP_AUTH_PASSWORD
+  #define ESP_AUTH_PASSWORD        "YOUR_ESP32_AUTH_PASSWORD"
 #endif
 #ifndef SECRET_DEFAULT_RFID_UIDS
   #define SECRET_DEFAULT_RFID_UIDS "RFID_ADMIN_01,RFID_OP_01"
@@ -147,16 +158,23 @@ const char* RTDB_BASE_URL = SECRET_FIREBASE_HOST;
   #define OLED_ADDR_FALLBACK 0x3D
 #endif
 
-// Active-LOW Relay Polarity & Timing Constants
+// Active-LOW Relay Polarity & Door Reed Switch Polarity (Identical across ESP 1, ESP 2, ESP 3)
 #define RELAY_ON                    LOW      // Active-LOW: LOW  = Relay Energized (Solenoid UNLOCKED)
 #define RELAY_OFF                   HIGH     // Active-LOW: HIGH = Relay De-energized (Solenoid LOCKED)
 #define RELAY_UNLOCK                RELAY_ON
 #define RELAY_LOCK                  RELAY_OFF
+#define DOOR_CLOSED_LEVEL           LOW      // INPUT_PULLUP + Reed Switch to GND: LOW  = Magnet Near (DOOR_CLOSED)
+#define DOOR_OPEN_LEVEL             HIGH     // INPUT_PULLUP + Reed Switch to GND: HIGH = Magnet Far  (DOOR_OPEN)
+
+// Solenoid FSM & Door Reed Switch Timing Constants
 #define BOOT_LOCK_GUARD_MS          4000UL   // Keep solenoid strictly LOCKED during initial boot & first RTDB sync
-#define DOOR_DEBOUNCE_MS            150UL    // 150ms software debounce for normal door_open status
-#define LOCK_WAIT_OPEN_TIMEOUT_MS   10000UL  // Max 10s waiting for door to open after Unlock
-#define LOCK_MAX_OPEN_HOLD_MS       10000UL  // Max 10s solenoid hold while door is open
-#define LOCK_CLOSING_CONFIRM_MS     2000UL   // 2s continuous CLOSED confirmation before relock
+#define DOOR_DEBOUNCE_MS            150UL    // 150ms software debounce for magnetic reed switch (GPIO 27)
+#define SOLENOID_EMI_BLANK_MS       300UL    // 300ms blanking after solenoid kick to ignore mechanical/EMI bounce
+#define UNLOCK_GRACE_MS             2000UL   // Min 2s grace after UNLOCKED before FSM checks DOOR_CLOSED relock
+#define AUTO_RELOCK_TIMEOUT_MS      15000UL  // 15s max auto-relock timeout (matches Web HMI 15s armed window)
+#define LOCK_WAIT_OPEN_TIMEOUT_MS   AUTO_RELOCK_TIMEOUT_MS // Max 15s waiting for door to open after Unlock
+#define LOCK_MAX_OPEN_HOLD_MS       AUTO_RELOCK_TIMEOUT_MS // Max 15s solenoid hold while door is open
+#define LOCK_CLOSING_CONFIRM_MS     2000UL   // 2s continuous DOOR_CLOSED confirmation before relock
 #define RELOCK_GRACE_MS             2000UL   // 2s post-relock grace period before FORCED ENTRY check
 #define BOOT_GRACE_MS               3000UL   // 3s post-boot grace period before FORCED ENTRY check
 #define FORCED_ENTRY_STABLE_MS      500UL    // Raw magnetic sensor must stay OPEN >= 500ms continuously
@@ -167,7 +185,11 @@ const char* RTDB_BASE_URL = SECRET_FIREBASE_HOST;
 #define CATALOG_SYNC_MS        60000UL  // Medicine limits & RFID UID cache refresh (60s)
 #define HISTORY_INTERVAL_MS    300000UL // 5-minute cold-chain snapshot interval
 #define MAX_HISTORY_SAMPLES    288      // 24 hours at 5-min interval
-#define RTDB_HTTP_TIMEOUT_MS   1800     // Short 1.8s HTTP timeout so OLED & sync never stall
+#define RTDB_HTTP_TIMEOUT_MS   1800     // Short 1.8s HTTP timeout (<= 2000ms WDT-safe)
+#define AUTH_HTTP_TIMEOUT_MS   2000     // Max 2.0s HTTP timeout for Firebase Auth REST signInWithPassword
+#define TG_HTTP_TIMEOUT_MS     2000     // Max 2.0s HTTP timeout for Telegram Bot API
+#define AUTH_TOKEN_REFRESH_MS  3000000UL // Auto-refresh Firebase idToken every 50 minutes (3,000,000 ms)
+#define AUTH_RETRY_COOLDOWN_MS 5000UL   // Minimum 5s interval between failed auth retries
 #define WIFI_BOOT_TIMEOUT_MS   8000UL   // Never block offline failsafe at boot
 #define WIFI_RECONNECT_MS      10000UL
 #define ALARM_QUEUE_CAPACITY   20       // Store-and-Forward RAM ring buffer size
@@ -200,6 +222,7 @@ SemaphoreHandle_t stateMutex = NULL;
   MFRC522 rfid(PIN_RFID_SS, PIN_RFID_RST);
   String pendingRfidUid = "";
   volatile bool hasPendingRfid = false;
+  volatile bool rfidReinitNeeded = false;
   bool rfidChipOnline = false;
   String cachedRfidUids = SECRET_DEFAULT_RFID_UIDS; // Persisted in NVS for offline auth
   unsigned long lastRfidCheckMs = 0;
@@ -298,6 +321,7 @@ enum LockFsmState {
 
 volatile LockFsmState lockState                = LOCK_STATE_LOCKED;
 volatile int          currentRelayLevel        = RELAY_OFF;
+unsigned long         unlockStartMs            = 0; // Timestamp when FSM latched into UNLOCKED (for UNLOCK_GRACE_MS & AUTO_RELOCK_TIMEOUT_MS)
 unsigned long         lockStateStartMs         = 0;
 unsigned long         lockOpenStartMs          = 0;
 unsigned long         closeStableStartMs       = 0;
@@ -389,32 +413,58 @@ void writeRelayLevel(int targetLevel) {
   currentRelayLevel = targetLevel;
   digitalWrite(RELAY_PIN, targetLevel);
 #if HAS_RFID
-  // Re-init RC522 registers in case solenoid switching spike disturbed 3.3V bus
-  rfid.PCD_Init();
-  rfid.PCD_AntennaOn();
+  // Flag non-blocking RC522 register check on next loop() tick after solenoid switching
+  rfidReinitNeeded = true;
 #endif
+}
+
+const char* resetReasonToStr(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:  return "POWERON";
+    case ESP_RST_EXT:      return "EXT_PIN";
+    case ESP_RST_SW:       return "SW_RESET";
+    case ESP_RST_PANIC:    return "PANIC";
+    case ESP_RST_INT_WDT:  return "INT_WDT";
+    case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT:      return "OTHER_WDT";
+    case ESP_RST_BROWNOUT: return "BROWNOUT (CHECK 5V/12V PSU & FLYBACK DIODE!)";
+    default:               return "OTHER";
+  }
+}
+
+const char* lockStateToStr(LockFsmState st) {
+  switch (st) {
+    case LOCK_STATE_LOCKED:          return "LOCKED";
+    case LOCK_STATE_WAIT_OPEN:       return "UNLOCKED(WAIT_OPEN)";
+    case LOCK_STATE_DOOR_OPEN:       return "UNLOCKED(DOOR_OPEN)";
+    case LOCK_STATE_CLOSING_CONFIRM: return "UNLOCKED(CLOSING_CONFIRM)";
+    default:                         return "UNKNOWN";
+  }
 }
 
 // Transition Solenoid FSM State (writes digitalWrite ONLY on actual state transitions)
 void setLockFsmState(LockFsmState nextState, unsigned long now, const char* reason) {
   if (lockState == nextState) return;
+  LockFsmState prevState = lockState;
   lockState = nextState;
   lockStateStartMs = now;
   forcedOpenStartMs = 0UL;
 
+  const char* doorStr = doorOpen ? "OPEN" : "CLOSED";
+  const char* rawPinStr = (digitalRead(PIN_DOOR_REED) == DOOR_OPEN_LEVEL) ? "HIGH" : "LOW";
+
   if (nextState == LOCK_STATE_LOCKED) {
     writeRelayLevel(RELAY_OFF); // HIGH = Relay OFF (Solenoid Locked)
     lastRelockMs = now;
-    Serial.printf("[SOLENOID FSM] -> LOCK_STATE_LOCKED (Relay HIGH/OFF) | %s\n", reason);
+    Serial.printf("[FSM] %s -> %s (Relay=HIGH/OFF) | Reason: %s | Door=%s (GPIO27=%s)\n",
+                  lockStateToStr(prevState), lockStateToStr(nextState), reason, doorStr, rawPinStr);
   } else {
-    writeRelayLevel(RELAY_ON);  // LOW = Relay ON (Solenoid Unlocked)
-    if (nextState == LOCK_STATE_WAIT_OPEN) {
-      Serial.printf("[SOLENOID FSM] -> LOCK_STATE_WAIT_OPEN (Relay LOW/ON) | %s\n", reason);
-    } else if (nextState == LOCK_STATE_DOOR_OPEN) {
-      Serial.printf("[SOLENOID FSM] -> LOCK_STATE_DOOR_OPEN (Relay LOW/ON) | %s\n", reason);
-    } else if (nextState == LOCK_STATE_CLOSING_CONFIRM) {
-      Serial.printf("[SOLENOID FSM] -> LOCK_STATE_CLOSING_CONFIRM (2s close confirm) | %s\n", reason);
+    if (prevState == LOCK_STATE_LOCKED) {
+      unlockStartMs = now; // Latch unlock start timestamp for UNLOCK_GRACE_MS & AUTO_RELOCK_TIMEOUT_MS
     }
+    writeRelayLevel(RELAY_ON);  // LOW = Relay ON (Solenoid Unlocked)
+    Serial.printf("[FSM] %s -> %s (Relay=LOW/ON) | Reason: %s | Door=%s (GPIO27=%s)\n",
+                  lockStateToStr(prevState), lockStateToStr(nextState), reason, doorStr, rawPinStr);
   }
 }
 
@@ -540,24 +590,30 @@ bool isUidInOfflineCache(const String& uid) {
 }
 
 void checkAndRecoverRfidReader() {
-  byte v      = rfid.PCD_ReadRegister(rfid.VersionReg);
+  byte v = rfid.PCD_ReadRegister(rfid.VersionReg);
+
+  if (v == 0x00 || v == 0xFF) {
+    if (rfidChipOnline) {
+      Serial.printf("[RFID WARN] RC522 disconnected/unresponsive (VersionReg=0x%02X). Non-blocking skip active.\n", v);
+    }
+    rfidChipOnline = false;
+    // Soft non-blocking reset pulse on RST pin without stalling loop
+    digitalWrite(PIN_RFID_RST, HIGH);
+    return;
+  }
+
   byte txAsk  = rfid.PCD_ReadRegister(rfid.TxASKReg);
   byte txCtrl = rfid.PCD_ReadRegister(rfid.TxControlReg);
 
-  if (v == 0x00 || v == 0xFF) {
-    rfidChipOnline = false;
-    Serial.printf("[RFID WARN] RC522 tidak terdeteksi (Reg=0x%02X). Cek 3.3V/GND/SPI/RST(GPIO21)\n", v);
+  // Detect initial boot or internal register reset caused by relay/solenoid EMI brownout (TxASKReg 0x40 -> 0x00)
+  if (!rfidChipOnline || txAsk != 0x40 || (txCtrl & 0x03) != 0x03) {
     rfid.PCD_Init();
+    rfid.PCD_AntennaOn();
+    rfidChipOnline = true;
+    Serial.printf("[RFID OK] RC522 Online & Antenna Active (VersionReg=0x%02X, FreeHeap=%u B)\n",
+                  v, ESP.getFreeHeap());
   } else {
-    // Also detect internal register reset caused by relay/solenoid EMI brownout (TxASKReg resets from 0x40 to 0x00)
-    if (!rfidChipOnline || txAsk != 0x40 || (txCtrl & 0x03) != 0x03) {
-      rfid.PCD_Init();
-      rfid.PCD_AntennaOn();
-      rfidChipOnline = true;
-      Serial.printf("[RFID OK] RC522 Initialized & Antenna Active (Ver=0x%02X). Siap tap kartu.\n", v);
-    } else {
-      rfid.PCD_AntennaOn();
-    }
+    rfid.PCD_AntennaOn();
   }
 }
 #endif
@@ -749,22 +805,172 @@ void renderOledScreen() {
 #endif
 
 // ============================================================================
-// 10. FIREBASE RTDB & TELEGRAM HTTPS HELPERS (RUN ON CORE 0)
+// 10. SINGLE SHARED TLS CLIENT & FIREBASE AUTH / RTDB / TELEGRAM HELPERS (CORE 0)
 // ============================================================================
-bool rtdbRequest(WiFiClientSecure& client, HTTPClient& http, const char* method,
-                 const String& path, const String& payload, String* outResp = nullptr) {
+// Global shared WiFiClientSecure & HTTPClient (used EXCLUSIVELY on Core 0)
+// Prevents dual-TLS heap exhaustion / Guru Meditation Error on ESP32!
+WiFiClientSecure sharedTlsClient;
+HTTPClient       sharedHttp;
+
+String        firebaseIdToken   = "";
+unsigned long lastAuthTokenMs   = 0;
+unsigned long lastAuthAttemptMs = 0;
+bool          firstHeartbeatLogged = false;
+
+String getCleanRtdbBaseUrl() {
+  String base = String(RTDB_BASE_URL);
+  base.trim();
+  while (base.endsWith("/")) {
+    base.remove(base.length() - 1);
+  }
+  return base;
+}
+
+bool authenticateFirebaseEsp32() {
   if (WiFi.status() != WL_CONNECTED) return false;
-  String url = String(RTDB_BASE_URL) + path + ".json";
+  if (String(FIREBASE_API_KEY).startsWith("YOUR_") || String(FIREBASE_API_KEY).length() < 10) {
+    Serial.println("[AUTH WARN] FIREBASE_API_KEY is placeholder — skipping signInWithPassword.");
+    return false;
+  }
+
+  lastAuthAttemptMs = millis();
+
+  // Release any previous RTDB keep-alive socket before connecting to identitytoolkit host
+  sharedHttp.end();
+  sharedTlsClient.stop();
+  sharedTlsClient.setInsecure();
+
+  String authUrl = String("https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=") + FIREBASE_API_KEY;
+  sharedHttp.setTimeout(AUTH_HTTP_TIMEOUT_MS);
+  sharedHttp.setReuse(false);
+
+  Serial.printf("[AUTH] Signing in as %s | FreeHeap before TLS: %u B\n",
+                ESP_AUTH_EMAIL, ESP.getFreeHeap());
+
+  if (!sharedHttp.begin(sharedTlsClient, authUrl)) {
+    sharedHttp.end();
+    sharedTlsClient.stop();
+    Serial.println("[AUTH ERR] sharedHttp.begin() failed for identitytoolkit.");
+    return false;
+  }
+  sharedHttp.addHeader("Content-Type", "application/json");
+
+  MAKE_JSON_DOC(reqDoc, 256);
+  reqDoc["email"]             = ESP_AUTH_EMAIL;
+  reqDoc["password"]          = ESP_AUTH_PASSWORD;
+  reqDoc["returnSecureToken"] = true;
+  String reqBody;
+  serializeJson(reqDoc, reqBody);
+
+  int code = sharedHttp.POST(reqBody);
+  String respStr = "";
+  if (code >= 200 && code < 300) {
+    respStr = sharedHttp.getString();
+  } else if (code > 0) {
+    respStr = sharedHttp.getString();
+  }
+  // ALWAYS close HTTP & TLS session to identitytoolkit before switching back to RTDB host
+  sharedHttp.end();
+  sharedTlsClient.stop();
+  sharedHttp.setReuse(true);
+
+  Serial.printf("[AUTH] signInWithPassword HTTP code=%d | FreeHeap after TLS: %u B\n",
+                code, ESP.getFreeHeap());
+
+  if (code >= 200 && code < 300) {
+    MAKE_JSON_DOC(filter, 64);
+    filter["idToken"] = true;
+    MAKE_JSON_DOC(respDoc, 2048);
+    if (!deserializeJson(respDoc, respStr, DeserializationOption::Filter(filter))) {
+      const char* tok = respDoc["idToken"] | "";
+      if (strlen(tok) > 20) {
+        firebaseIdToken = String(tok);
+        lastAuthTokenMs = millis();
+        Serial.printf("[AUTH OK] Token acquired (len=%u) | FreeHeap=%u B\n",
+                      (unsigned int)firebaseIdToken.length(), ESP.getFreeHeap());
+        return true;
+      }
+    }
+    Serial.println("[AUTH ERR] Failed to parse idToken from response JSON.");
+  } else {
+    Serial.printf("[AUTH ERR] Login failed (HTTP %d): %s\n", code, respStr.substring(0, 120).c_str());
+  }
+  return false;
+}
+
+String buildRtdbUrlWithAuth(const String& rawPathAndQuery) {
+  int qIdx = rawPathAndQuery.indexOf('?');
+  String basePath  = (qIdx >= 0) ? rawPathAndQuery.substring(0, qIdx) : rawPathAndQuery;
+  String queryPart = (qIdx >= 0) ? rawPathAndQuery.substring(qIdx + 1) : "";
+
+  if (!basePath.startsWith("/")) {
+    basePath = "/" + basePath;
+  }
+  // Avoid accidental double .json
+  if (basePath.endsWith(".json")) {
+    basePath.remove(basePath.length() - 5);
+  }
+
+  String url = getCleanRtdbBaseUrl() + basePath + ".json";
+  if (queryPart.length() > 0 && firebaseIdToken.length() > 0) {
+    url += "?" + queryPart + "&auth=" + firebaseIdToken;
+  } else if (queryPart.length() > 0) {
+    url += "?" + queryPart;
+  } else if (firebaseIdToken.length() > 0) {
+    url += "?auth=" + firebaseIdToken;
+  }
+  return url;
+}
+
+bool rtdbRequest(WiFiClientSecure& client, HTTPClient& http, const char* method,
+                 const String& path, const String& payload, String* outResp = nullptr,
+                 bool allowAuthRetry = true, int* outHttpCode = nullptr) {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (outHttpCode) *outHttpCode = -1;
+    return false;
+  }
+
+  // Ensure valid idToken before sending RTDB request
+  unsigned long nowMs = millis();
+  if (firebaseIdToken.length() == 0 || (nowMs - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
+    if (lastAuthAttemptMs == 0 || (nowMs - lastAuthAttemptMs >= AUTH_RETRY_COOLDOWN_MS) ||
+        (nowMs - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
+      authenticateFirebaseEsp32();
+    }
+  }
+
+  String url = buildRtdbUrlWithAuth(path);
   http.setTimeout(RTDB_HTTP_TIMEOUT_MS);
-  if (!http.begin(client, url)) return false;
+  if (!http.begin(client, url)) {
+    http.end();
+    if (outHttpCode) *outHttpCode = -2;
+    return false;
+  }
   if (payload.length() > 0) {
     http.addHeader("Content-Type", "application/json");
   }
+
   int code = http.sendRequest(method, payload);
+  if (outHttpCode) *outHttpCode = code;
+
   if (outResp && code >= 200 && code < 300) {
     *outResp = http.getString();
   }
+  // ALWAYS call http.end() at the end of every request to prevent memory leaks
   http.end();
+
+  if (code < 0) {
+    client.stop();
+  }
+
+  // Auto re-login & one-shot retry if token was rejected / expired (HTTP 401)
+  if (code == 401 && allowAuthRetry) {
+    Serial.printf("[AUTH 401] %s %s rejected (401) -> Re-authenticating ESP32...\n", method, path.c_str());
+    if (authenticateFirebaseEsp32()) {
+      return rtdbRequest(client, http, method, path, payload, outResp, false, outHttpCode);
+    }
+  }
+
   return (code >= 200 && code < 300);
 }
 
@@ -844,14 +1050,21 @@ bool sendTelegramMessageNow(const String& botToken, const String& chatId, const 
   if (WiFi.status() != WL_CONNECTED || botToken.length() < 10 || chatId.length() == 0) {
     return false;
   }
-  WiFiClientSecure tgClient;
-  tgClient.setInsecure();
-  HTTPClient tgHttp;
-  tgHttp.setTimeout(6000);
+
+  // Reuse single shared TLS & HTTP client on Core 0 to avoid second-TLS OOM crash
+  sharedHttp.end();
+  sharedTlsClient.stop();
+  sharedTlsClient.setInsecure();
+  sharedHttp.setTimeout(TG_HTTP_TIMEOUT_MS);
+  sharedHttp.setReuse(false);
 
   String url = "https://api.telegram.org/bot" + botToken + "/sendMessage";
-  if (!tgHttp.begin(tgClient, url)) return false;
-  tgHttp.addHeader("Content-Type", "application/json");
+  if (!sharedHttp.begin(sharedTlsClient, url)) {
+    sharedHttp.end();
+    sharedTlsClient.stop();
+    return false;
+  }
+  sharedHttp.addHeader("Content-Type", "application/json");
 
   MAKE_JSON_DOC(doc, 384);
   doc["chat_id"] = chatId;
@@ -859,8 +1072,11 @@ bool sendTelegramMessageNow(const String& botToken, const String& chatId, const 
   String body;
   serializeJson(doc, body);
 
-  int code = tgHttp.POST(body);
-  tgHttp.end();
+  int code = sharedHttp.POST(body);
+  sharedHttp.end();
+  sharedTlsClient.stop();
+  sharedHttp.setReuse(true);
+
   if (code >= 200 && code < 300) {
     Serial.printf("[TELEGRAM OK] Sent: %s\n", text.c_str());
     return true;
@@ -979,33 +1195,26 @@ void pushHistorySnapshotAndPrune(WiFiClientSecure& client, HTTPClient& http) {
     Serial.printf("[HISTORY 5M] Logged %s -> T:%.1fC H:%.1f%% PWM:%d%% Exc:%s\n",
                   histPath.c_str(), tNow, hNow, pwmNow, excursion ? "YES" : "NO");
 
-    // Lightweight shallow prune if > 288 samples (24h)
-    String shallowUrl = String(RTDB_BASE_URL) + "/history/" + LOCKER_KEY + ".json?shallow=true";
-    http.setTimeout(5000);
-    if (http.begin(client, shallowUrl)) {
-      if (http.GET() == 200) {
-        String keysJson = http.getString();
-        int count = 0;
-        unsigned long minKey = ULONG_MAX;
-        int idx = 0;
-        while ((idx = keysJson.indexOf('"', idx)) >= 0) {
-          int endIdx = keysJson.indexOf('"', idx + 1);
-          if (endIdx < 0) break;
-          String k = keysJson.substring(idx + 1, endIdx);
-          unsigned long kv = strtoul(k.c_str(), nullptr, 10);
-          if (kv > 1700000000UL) {
-            count++;
-            if (kv < minKey) minKey = kv;
-          }
-          idx = endIdx + 1;
+    // Lightweight shallow prune if > 288 samples (24h) — authenticated with ?shallow=true&auth=<idToken>
+    String keysJson;
+    if (rtdbRequest(client, http, "GET", String("/history/") + LOCKER_KEY + "?shallow=true", "", &keysJson)) {
+      int count = 0;
+      unsigned long minKey = ULONG_MAX;
+      int idx = 0;
+      while ((idx = keysJson.indexOf('"', idx)) >= 0) {
+        int endIdx = keysJson.indexOf('"', idx + 1);
+        if (endIdx < 0) break;
+        String k = keysJson.substring(idx + 1, endIdx);
+        unsigned long kv = strtoul(k.c_str(), nullptr, 10);
+        if (kv > 1700000000UL) {
+          count++;
+          if (kv < minKey) minKey = kv;
         }
-        http.end();
-        if (count > MAX_HISTORY_SAMPLES && minKey != ULONG_MAX) {
-          rtdbRequest(client, http, "DELETE",
-                      String("/history/") + LOCKER_KEY + "/" + String(minKey), "");
-        }
-      } else {
-        http.end();
+        idx = endIdx + 1;
+      }
+      if (count > MAX_HISTORY_SAMPLES && minKey != ULONG_MAX) {
+        rtdbRequest(client, http, "DELETE",
+                    String("/history/") + LOCKER_KEY + "/" + String(minKey), "");
       }
     }
   }
@@ -1043,8 +1252,12 @@ void syncCatalogAndRfidCache(WiFiClientSecure& client, HTTPClient& http) {
       for (JsonPair kv : root) {
         bool active = kv.value()["active"] | true;
         if (active) {
-          if (uidList.length() > 0) uidList += ",";
-          uidList += String(kv.key().c_str());
+          const char* rfidVal = kv.value()["rfid_uid"] | "";
+          String entryUid = (strlen(rfidVal) > 0) ? String(rfidVal) : String(kv.key().c_str());
+          if (entryUid.length() > 0) {
+            if (uidList.length() > 0) uidList += ",";
+            uidList += entryUid;
+          }
         }
       }
       if (uidList.length() > 0) {
@@ -1063,10 +1276,10 @@ void syncCatalogAndRfidCache(WiFiClientSecure& client, HTTPClient& http) {
 // 11. CORE 0 BACKGROUND TASK: FIREBASE SYNC, STORE-AND-FORWARD & TELEGRAM
 // ============================================================================
 void firebaseSyncTask(void* parameter) {
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
-  http.setReuse(true);
+  sharedTlsClient.setInsecure();
+  sharedHttp.setReuse(true);
+  WiFiClientSecure& client = sharedTlsClient;
+  HTTPClient&       http   = sharedHttp;
 
   bool ntpConfigured          = false;
   bool bootUnlockPurged       = false;
@@ -1094,6 +1307,14 @@ void firebaseSyncTask(void* parameter) {
     if (!ntpConfigured) {
       configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
       ntpConfigured = true;
+    }
+
+    // Periodic 50-minute Firebase Auth idToken refresh (and initial boot sign-in)
+    if (firebaseIdToken.length() == 0 || (now - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
+      if (lastAuthAttemptMs == 0 || (now - lastAuthAttemptMs >= AUTH_RETRY_COOLDOWN_MS) ||
+          (now - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
+        authenticateFirebaseEsp32();
+      }
     }
 
     // 0. Boot Safety Handshake: Proactively clear any stale unlock_cmd=true in RTDB before first read
@@ -1173,7 +1394,7 @@ void firebaseSyncTask(void* parameter) {
       // A. Read /system (emergency_stop + telegram config)
       String sysResp;
       if (rtdbRequest(client, http, "GET", "/system", "", &sysResp)) {
-        MAKE_JSON_DOC(sysDoc, 512);
+        MAKE_JSON_DOC(sysDoc, 1024);
         if (!deserializeJson(sysDoc, sysResp)) {
           bool eNow = sysDoc["emergency_stop"] | false;
           emergencyStop = eNow;
@@ -1242,11 +1463,12 @@ void firebaseSyncTask(void* parameter) {
               alarmAcknowledged = true;
             }
 
-            // Boot Lock Guard & Anti Re-Trigger unlock_cmd:
+            // Boot Lock Guard & Latched Unlock Trigger (One-Shot Firebase Flag Reset):
             // 1. On initial boot sync (!initialRtdbSyncComplete) or inside BOOT_LOCK_GUARD_MS,
             //    NEVER unlock; purge any stale unlock_cmd=true sitting in Firebase from before boot.
-            // 2. After boot sync is complete, ONLY accept unlock_cmd=true when FSM is in LOCK_STATE_LOCKED
-            //    and previous unlock_cmd has been confirmed false.
+            // 2. When unlock_cmd==true arrives while LOCKED, atomically latch remoteUnlockReq=true
+            //    and reset unlock_cmd=false in Firebase ONCE.
+            // 3. Subsequent polling cycles reading unlock_cmd==false NEVER overwrite lockState or RELAY_PIN!
             if (!initialRtdbSyncComplete) {
               initialRtdbSyncComplete = true;
               remoteUnlockReq = false;
@@ -1262,23 +1484,33 @@ void firebaseSyncTask(void* parameter) {
                 }
               }
             } else if (!unlock) {
+              // Polling sees unlock_cmd == false: ONLY clear handshake lock; NEVER touch active FSM/Relay!
               waitUnlockFalseConfirm = false;
             } else if (!emergencyStop && now >= BOOT_LOCK_GUARD_MS) {
-              if (lockState == LOCK_STATE_LOCKED &&
-                  !remoteUnlockReq &&
-                  !clearUnlockFlagPending &&
-                  !waitUnlockFalseConfirm) {
-                waitUnlockFalseConfirm = true;
-                clearUnlockFlagPending = true;
-                remoteUnlockReq        = true;
-                lastUnlockResetTryMs   = now;
+              bool canTriggerUnlock = false;
+              if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                canTriggerUnlock = (lockState == LOCK_STATE_LOCKED) &&
+                                   !remoteUnlockReq &&
+                                   !clearUnlockFlagPending &&
+                                   !waitUnlockFalseConfirm;
+                if (canTriggerUnlock) {
+                  waitUnlockFalseConfirm = true;
+                  clearUnlockFlagPending = true;
+                  remoteUnlockReq        = true;
+                  lastUnlockResetTryMs   = now;
+                }
+                xSemaphoreGive(stateMutex);
+              }
+              if (canTriggerUnlock) {
+                Serial.println("[RTDB] Received unlock_cmd=true -> Latching local FSM UNLOCKED & resetting flag once");
                 if (rtdbRequest(client, http, "PATCH", String("/lockers/") + LOCKER_KEY + "/control",
                                 "{\"unlock_cmd\":false}")) {
                   clearUnlockFlagPending = false;
                   waitUnlockFalseConfirm = false;
+                  Serial.println("[RTDB] unlock_cmd confirmed reset to false (one-shot)");
                 }
               } else {
-                // Ignore duplicate unlock_cmd while FSM is active, but ensure RTDB flag is cleared
+                // Already unlocked/latched -> do NOT alter FSM state, just ensure RTDB flag is cleared
                 clearUnlockFlagPending = true;
               }
             } else if (unlock) {
@@ -1295,8 +1527,16 @@ void firebaseSyncTask(void* parameter) {
       // C. Patch Heartbeat, Sensor & PID Output to RTDB
       uint64_t ep = getEpochSec();
       unsigned long hbVal = (ep > 0ULL) ? (unsigned long)ep : (millis() / 1000UL);
-      rtdbRequest(client, http, "PATCH", String("/lockers/") + LOCKER_KEY + "/meta",
-                  String("{\"status\":\"online\",\"heartbeat\":") + hbVal + "}");
+      int hbHttpCode = 0;
+      bool okHb = rtdbRequest(client, http, "PATCH", String("/lockers/") + LOCKER_KEY + "/meta",
+                              String("{\"status\":\"online\",\"heartbeat\":") + hbVal + "}",
+                              nullptr, true, &hbHttpCode);
+
+      if (!firstHeartbeatLogged) {
+        firstHeartbeatLogged = true;
+        Serial.printf("[BOOT DIAG] First Heartbeat PATCH /lockers/%s/meta -> HTTP %d (%s) | FreeHeap=%u B\n",
+                      LOCKER_KEY, hbHttpCode, okHb ? "OK" : "FAIL", ESP.getFreeHeap());
+      }
 
       MAKE_JSON_DOC(sensorDoc, 256);
       sensorDoc["temp"]      = roundf(currentTemp * 10.0f) / 10.0f;
@@ -1305,9 +1545,11 @@ void firebaseSyncTask(void* parameter) {
       sensorDoc["fan_rpm"]   = (int)currentRpm;
       String sensorBody;
       serializeJson(sensorDoc, sensorBody);
+      int sensorHttpCode = 0;
       bool okSensor = rtdbRequest(client, http, "PATCH",
-                                  String("/lockers/") + LOCKER_KEY + "/sensor", sensorBody);
-      firebaseSynced = okSensor;
+                                  String("/lockers/") + LOCKER_KEY + "/sensor", sensorBody,
+                                  nullptr, true, &sensorHttpCode);
+      firebaseSynced = (okHb && okSensor);
 
       rtdbRequest(client, http, "PATCH", String("/lockers/") + LOCKER_KEY + "/pid",
                   String("{\"output_pwm\":") + outputPwm + "}");
@@ -1319,12 +1561,14 @@ void firebaseSyncTask(void* parameter) {
       faultStr.trim();
       if (faultStr.length() == 0) faultStr = "OK";
 
-      Serial.printf("[%s] T:%.1fC(SP:%.1fC) H:%.1f%% Door:%s Fan:%d%%(%dRPM) Fault:%s RTDB:%s\n",
+      Serial.printf("[%s] T:%.1fC(SP:%.1fC) H:%.1f%% Door:%s Fan:%d%%(%dRPM) Fault:%s HB_HTTP:%d Heap:%uB RTDB:%s\n",
                     ESP_LABEL, currentTemp, pidSetpoint, currentHum,
                     doorOpen ? "OPEN" : "CLSD",
                     outputPwm, currentRpm,
                     faultStr.c_str(),
-                    okSensor ? "SYNC" : "ERR");
+                    hbHttpCode,
+                    ESP.getFreeHeap(),
+                    firebaseSynced ? "SYNC" : "ERR");
     }
 
     // 6. Periodic 3-Second Remote Lockers Fetch for OLED Watchdog (#if HAS_OLED)
@@ -1368,21 +1612,28 @@ void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=======================================================");
-  Serial.printf("SMART MEDICINE LOCKER V2 — %s (%s)\n", ESP_LABEL, LOCKER_LABEL);
-  Serial.printf("Modules: RFID=%s | OLED=%s\n", HAS_RFID ? "ON" : "OFF", HAS_OLED ? "ON" : "OFF");
+  Serial.printf("SMART MEDICINE LOCKER V2 — NODE_ID=%d | %s (%s -> /lockers/%s)\n",
+                NODE_ID, ESP_LABEL, LOCKER_LABEL, LOCKER_KEY);
+  Serial.printf("Modules: RFID=%s | OLED=%s | Boot FreeHeap=%u B\n",
+                HAS_RFID ? "ON" : "OFF", HAS_OLED ? "ON" : "OFF", ESP.getFreeHeap());
+  esp_reset_reason_t rstReason = esp_reset_reason();
+  Serial.printf("[BOOT DIAG] Reset Reason: %s (%d)\n", resetReasonToStr(rstReason), (int)rstReason);
   Serial.println("=======================================================");
 
   stateMutex = xSemaphoreCreateMutex();
   memset(tgAlerts, 0, sizeof(tgAlerts));
 
-  // 2. Door Switch & Fan Tachometer
+  // 2. Door Switch (INPUT_PULLUP: LOW=DOOR_CLOSED, HIGH=DOOR_OPEN — identical across ESP 1/2/3) & Fan Tachometer
   pinMode(PIN_DOOR_REED, INPUT_PULLUP);
-  bool initialDoor = (digitalRead(PIN_DOOR_REED) == HIGH);
+  bool initialDoor = (digitalRead(PIN_DOOR_REED) == DOOR_OPEN_LEVEL);
   doorOpen                 = initialDoor;
   prevDoorOpen             = initialDoor;
   lastRawDoor              = initialDoor;
   forcedLatchActive        = initialDoor;
   authorizedDoorOpenActive = initialDoor;
+  Serial.printf("[BOOT DIAG] Door Reed Switch (GPIO %d, INPUT_PULLUP): %s (raw=%s)\n",
+                PIN_DOOR_REED, initialDoor ? "DOOR_OPEN" : "DOOR_CLOSED",
+                initialDoor ? "HIGH" : "LOW");
 
   pinMode(PIN_FAN_TACH, INPUT_PULLUP);
   tachIsLow = !fastReadGpio(PIN_FAN_TACH);
@@ -1405,35 +1656,49 @@ void setup() {
   initOledDisplay();
 #endif
 
-#if HAS_RFID
-  pinMode(PIN_RFID_SS, OUTPUT);
-  digitalWrite(PIN_RFID_SS, HIGH);
-  SPI.begin(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS);
-  rfid.PCD_Init();
-  delay(50);
-  checkAndRecoverRfidReader();
-#endif
-
-  // 5. Bounded Non-Blocking Wi-Fi Connect (Max 8s -> continue in Offline Failsafe if down)
+  // 5. Bounded Non-Blocking Wi-Fi Connect FIRST (Max 8s -> never blocked by SPI/RC522)
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("[WIFI] Connecting to %s ", WIFI_SSID);
+  Serial.printf("[BOOT DIAG] Connecting Wi-Fi to SSID '%s' ", WIFI_SSID);
   unsigned long bootWifiStart = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - bootWifiStart < WIFI_BOOT_TIMEOUT_MS)) {
     delay(400);
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[WIFI] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("\n[BOOT DIAG] Wi-Fi CONNECTED! IP=%s | RSSI=%d dBm | FreeHeap=%u B\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI(), ESP.getFreeHeap());
   } else {
-    Serial.println("\n[WIFI] Offline at boot -> Running NVS Local PID Failsafe Mode!");
+    Serial.printf("\n[BOOT DIAG] Wi-Fi OFFLINE at boot (status=%d) -> NVS Local PID Failsafe Mode! FreeHeap=%u B\n",
+                  (int)WiFi.status(), ESP.getFreeHeap());
   }
 
-  // 6. Launch Core 0 Network Task (16 KB Stack for TLS + JSON + Telegram)
+#if HAS_RFID
+  // 6. Non-Blocking Isolated RC522 Init for NODE_ID == 1 (Never blocks Wi-Fi or Heartbeat if RC522 is absent)
+  pinMode(PIN_RFID_SS, OUTPUT);
+  digitalWrite(PIN_RFID_SS, HIGH);
+  pinMode(PIN_RFID_RST, OUTPUT);
+  digitalWrite(PIN_RFID_RST, HIGH);
+  SPI.begin(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS);
+  byte bootRfidVer = rfid.PCD_ReadRegister(rfid.VersionReg);
+  if (bootRfidVer != 0x00 && bootRfidVer != 0xFF) {
+    rfid.PCD_Init();
+    rfid.PCD_AntennaOn();
+    rfidChipOnline = true;
+    Serial.printf("[BOOT DIAG] RFID RC522 Ready (VersionReg=0x%02X) | FreeHeap=%u B\n",
+                  bootRfidVer, ESP.getFreeHeap());
+  } else {
+    rfidChipOnline = false;
+    Serial.printf("[BOOT DIAG] RFID RC522 NOT responding (VersionReg=0x%02X) -> Skipping RFID polling so Heartbeat runs normally!\n",
+                  bootRfidVer);
+  }
+#endif
+
+  // 7. Launch Core 0 Network Task (20 KB Stack for Shared TLS + RTDB JSON + Telegram)
   xTaskCreatePinnedToCore(
     firebaseSyncTask,
     "FirebaseSyncTask",
-    16384,
+    20480,
     NULL,
     1,
     NULL,
@@ -1445,8 +1710,13 @@ void loop() {
   unsigned long now = millis();
 
 #if HAS_RFID
-  // 1. Instant RFID Card Polling (Core 1 — Zero Wi-Fi Lag)
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+  // 1. Instant RFID Card Polling (Core 1 — Only polls SPI when RC522 is confirmed online!)
+  if (rfidReinitNeeded) {
+    rfidReinitNeeded = false;
+    checkAndRecoverRfidReader();
+  }
+
+  if (rfidChipOnline && rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
     String uidStr = "";
     for (byte i = 0; i < rfid.uid.size; i++) {
       if (rfid.uid.uidByte[i] < 0x10) uidStr += "0";
@@ -1455,7 +1725,7 @@ void loop() {
     uidStr.toUpperCase();
 
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("\n>>> [RFID TAP] UID: %s (Sending to Firebase) <<<\n", uidStr.c_str());
+      Serial.printf("\n>>> [RFID TAP] UID: %s (Sending to Firebase /auth/rfid_scan) <<<\n", uidStr.c_str());
       if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         pendingRfidUid = uidStr;
         hasPendingRfid = true;
@@ -1471,15 +1741,15 @@ void loop() {
     rfid.PCD_StopCrypto1();
   }
 
-  // Periodic RC522 health check & auto-recovery (every 3s)
+  // Periodic RC522 health check & non-blocking auto-recovery (every 3s)
   if (now - lastRfidCheckMs >= 3000UL) {
     lastRfidCheckMs = now;
     checkAndRecoverRfidReader();
   }
 #endif
 
-  // 2. 150ms Software Debounce for Door Magnetic Switch (GPIO 27)
-  bool rawDoorOpen = (digitalRead(PIN_DOOR_REED) == HIGH);
+  // 2. 150ms Software Debounce for Door Magnetic Switch (GPIO 27, INPUT_PULLUP: LOW=CLOSED, HIGH=OPEN)
+  bool rawDoorOpen = (digitalRead(PIN_DOOR_REED) == DOOR_OPEN_LEVEL);
   if (rawDoorOpen != lastRawDoor) {
     lastRawDoor = rawDoorOpen;
     lastDoorBounceMs = now;
@@ -1487,10 +1757,13 @@ void loop() {
   if ((now - lastDoorBounceMs) >= DOOR_DEBOUNCE_MS && rawDoorOpen != doorOpen) {
     doorOpen = rawDoorOpen;
     immediateDoorPushPending = true;
-    Serial.printf("[DOOR] GPIO 27 (150ms debounced) -> %s\n", doorOpen ? "OPEN" : "CLOSED");
+    Serial.printf("[DOOR] GPIO %d (150ms debounced) -> %s (raw=%s)\n",
+                  PIN_DOOR_REED, doorOpen ? "DOOR_OPEN" : "DOOR_CLOSED",
+                  rawDoorOpen ? "HIGH" : "LOW");
 
-    // When an authorized open door is finally closed, start 2s post-close grace & re-arm security
-    if (!doorOpen && authorizedDoorOpenActive) {
+    // When an authorized open door is finally closed AFTER coil already timed out (LOCKED),
+    // start 2s post-close grace & re-arm FORCED ENTRY security
+    if (!doorOpen && authorizedDoorOpenActive && lockState == LOCK_STATE_LOCKED) {
       authorizedDoorOpenActive = false;
       lastRelockMs = now;
       forcedOpenStartMs = 0UL;
@@ -1498,35 +1771,47 @@ void loop() {
     }
   }
 
-  // 3. E-STOP Override & 4-Stage Solenoid Finite State Machine (FSM)
+  // 3. E-STOP Override & Latched 4-Stage Solenoid Finite State Machine (FSM)
   if (emergencyStop) {
-    remoteUnlockReq   = false;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      remoteUnlockReq = false;
+      xSemaphoreGive(stateMutex);
+    }
     forcedOpenStartMs = 0UL;
     if (lockState != LOCK_STATE_LOCKED) {
       setLockFsmState(LOCK_STATE_LOCKED, now, "E-STOP Override");
     }
   } else {
     switch (lockState) {
-      case LOCK_STATE_LOCKED:
-        if (remoteUnlockReq && initialRtdbSyncComplete && (now >= BOOT_LOCK_GUARD_MS)) {
-          remoteUnlockReq = false;
+      case LOCK_STATE_LOCKED: {
+        bool unlockTriggered = false;
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+          if (remoteUnlockReq) {
+            remoteUnlockReq = false;
+            unlockTriggered = true;
+          }
+          xSemaphoreGive(stateMutex);
+        }
+        if (unlockTriggered && initialRtdbSyncComplete && (now >= BOOT_LOCK_GUARD_MS)) {
           authorizedDoorOpenActive = true;
-          setLockFsmState(LOCK_STATE_WAIT_OPEN, now, "Unlock command accepted");
-        } else if (remoteUnlockReq && (!initialRtdbSyncComplete || (now < BOOT_LOCK_GUARD_MS))) {
-          // Discard any premature unlock request during boot guard window
-          remoteUnlockReq = false;
+          unlockStartMs = now;
+          setLockFsmState(LOCK_STATE_WAIT_OPEN, now, "HMI Cmd");
+        } else if (unlockTriggered) {
+          Serial.println("[FSM] Ignored premature unlock request during boot guard window");
         }
         break;
+      }
 
       case LOCK_STATE_WAIT_OPEN:
         forcedOpenStartMs = 0UL;
         authorizedDoorOpenActive = true;
-        if (doorOpen) {
+        // Ignore initial solenoid kick/EMI bounce (300ms) before detecting Door Open
+        if (((now - unlockStartMs) >= SOLENOID_EMI_BLANK_MS) && doorOpen) {
           lockOpenStartMs = now;
-          setLockFsmState(LOCK_STATE_DOOR_OPEN, now, "Door opened");
-        } else if ((now - lockStateStartMs) >= LOCK_WAIT_OPEN_TIMEOUT_MS) {
+          setLockFsmState(LOCK_STATE_DOOR_OPEN, now, "Door Opened");
+        } else if ((now - unlockStartMs) >= AUTO_RELOCK_TIMEOUT_MS) {
           authorizedDoorOpenActive = false;
-          setLockFsmState(LOCK_STATE_LOCKED, now, "Wait-open timeout (10s, door never opened)");
+          setLockFsmState(LOCK_STATE_LOCKED, now, "Timeout (15s, Door Never Opened)");
         }
         break;
 
@@ -1534,12 +1819,13 @@ void loop() {
         forcedOpenStartMs = 0UL;
         authorizedDoorOpenActive = true;
         if ((now - lockOpenStartMs) >= LOCK_MAX_OPEN_HOLD_MS) {
-          // Turn off solenoid coil after 10s to prevent overheating,
-          // but keep authorizedDoorOpenActive = true until door is actually closed!
-          setLockFsmState(LOCK_STATE_LOCKED, now, "Max open hold 10s (coil off, door still authorized open)");
-        } else if (!doorOpen) {
+          // Turn off solenoid coil after 15s to prevent overheating,
+          // while keeping authorizedDoorOpenActive = true until door is actually closed!
+          setLockFsmState(LOCK_STATE_LOCKED, now, "Timeout (15s Max Open Hold, Coil Off)");
+        } else if (((now - unlockStartMs) >= UNLOCK_GRACE_MS) && !doorOpen) {
+          // Enforce minimum UNLOCK_GRACE_MS (2000ms) after Unlock before checking DOOR_CLOSED relock
           closeStableStartMs = now;
-          setLockFsmState(LOCK_STATE_CLOSING_CONFIRM, now, "Door closed detected");
+          setLockFsmState(LOCK_STATE_CLOSING_CONFIRM, now, "Door Closed Detected (Post-Grace)");
         }
         break;
 
@@ -1548,11 +1834,17 @@ void loop() {
         if (doorOpen) {
           // Re-opened before 2s confirm finished -> return to DOOR_OPEN without resetting lockOpenStartMs
           authorizedDoorOpenActive = true;
-          setLockFsmState(LOCK_STATE_DOOR_OPEN, now, "Door re-opened before 2s confirm");
+          setLockFsmState(LOCK_STATE_DOOR_OPEN, now, "Door Re-Opened Before 2s Confirm");
+        } else if ((now - unlockStartMs) < UNLOCK_GRACE_MS) {
+          // Extra guard: never relock inside the 2s UNLOCK_GRACE_MS window
+          closeStableStartMs = now;
         } else if (((now - closeStableStartMs) >= LOCK_CLOSING_CONFIRM_MS) ||
                    ((now - lockOpenStartMs) >= LOCK_MAX_OPEN_HOLD_MS)) {
           authorizedDoorOpenActive = false;
-          setLockFsmState(LOCK_STATE_LOCKED, now, "Door closed confirmed (2s)");
+          const char* lockReason = ((now - closeStableStartMs) >= LOCK_CLOSING_CONFIRM_MS)
+                                     ? "Door Closed Confirmed (2s)"
+                                     : "Timeout (15s Max Open Hold)";
+          setLockFsmState(LOCK_STATE_LOCKED, now, lockReason);
         }
         break;
     }

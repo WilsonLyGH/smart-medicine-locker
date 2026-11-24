@@ -125,7 +125,8 @@ const char* RTDB_BASE_URL = SECRET_FIREBASE_HOST;
 // ============================================================================
 #define PIN_DHT         4    // DHT22 Data
 #define PIN_DOOR_REED   27   // Magnetic Switch (INPUT_PULLUP: LOW = CLOSED, HIGH = OPEN)
-#define PIN_RELAY_LOCK  26   // Active-LOW Relay (LOW = Unlock, HIGH = Lock)
+#define PIN_RELAY_LOCK  26   // Active-LOW Relay (LOW = Unlock/ON, HIGH = Lock/OFF)
+#define RELAY_PIN       PIN_RELAY_LOCK
 #define PIN_FAN_PWM     25   // 4-Pin Fan PWM Control (25 kHz)
 #define PIN_FAN_TACH    32   // 4-Pin Fan Tachometer Interrupt (INPUT_PULLUP)
 
@@ -146,9 +147,12 @@ const char* RTDB_BASE_URL = SECRET_FIREBASE_HOST;
   #define OLED_ADDR_FALLBACK 0x3D
 #endif
 
-// Timing & Control Constants
-#define RELAY_UNLOCK                LOW
-#define RELAY_LOCK                  HIGH
+// Active-LOW Relay Polarity & Timing Constants
+#define RELAY_ON                    LOW      // Active-LOW: LOW  = Relay Energized (Solenoid UNLOCKED)
+#define RELAY_OFF                   HIGH     // Active-LOW: HIGH = Relay De-energized (Solenoid LOCKED)
+#define RELAY_UNLOCK                RELAY_ON
+#define RELAY_LOCK                  RELAY_OFF
+#define BOOT_LOCK_GUARD_MS          4000UL   // Keep solenoid strictly LOCKED during initial boot & first RTDB sync
 #define DOOR_DEBOUNCE_MS            150UL    // 150ms software debounce for normal door_open status
 #define LOCK_WAIT_OPEN_TIMEOUT_MS   10000UL  // Max 10s waiting for door to open after Unlock
 #define LOCK_MAX_OPEN_HOLD_MS       10000UL  // Max 10s solenoid hold while door is open
@@ -293,6 +297,7 @@ enum LockFsmState {
 };
 
 volatile LockFsmState lockState                = LOCK_STATE_LOCKED;
+volatile int          currentRelayLevel        = RELAY_OFF;
 unsigned long         lockStateStartMs         = 0;
 unsigned long         lockOpenStartMs          = 0;
 unsigned long         closeStableStartMs       = 0;
@@ -305,6 +310,7 @@ bool                  authorizedDoorOpenActive = false; // True while door remai
 volatile bool  emergencyStop            = false;
 bool           prevEmergencyStop        = false;
 volatile bool  firebaseSynced           = false;
+volatile bool  initialRtdbSyncComplete  = false; // Blocks stale unlock_cmd until initial boot RTDB read completes
 volatile bool  remoteUnlockReq          = false;
 volatile bool  clearUnlockFlagPending   = false;
 volatile bool  waitUnlockFalseConfirm   = false;
@@ -377,31 +383,31 @@ uint64_t getEpochMs() {
   return (sec > 0ULL) ? (sec * 1000ULL) : 0ULL;
 }
 
+// Hardware Relay Writer — Only calls digitalWrite when target level actually changes
+void writeRelayLevel(int targetLevel) {
+  if (currentRelayLevel == targetLevel) return;
+  currentRelayLevel = targetLevel;
+  digitalWrite(RELAY_PIN, targetLevel);
+#if HAS_RFID
+  // Re-init RC522 registers in case solenoid switching spike disturbed 3.3V bus
+  rfid.PCD_Init();
+  rfid.PCD_AntennaOn();
+#endif
+}
+
 // Transition Solenoid FSM State (writes digitalWrite ONLY on actual state transitions)
 void setLockFsmState(LockFsmState nextState, unsigned long now, const char* reason) {
   if (lockState == nextState) return;
-  LockFsmState prevState = lockState;
   lockState = nextState;
   lockStateStartMs = now;
   forcedOpenStartMs = 0UL;
 
   if (nextState == LOCK_STATE_LOCKED) {
-    digitalWrite(PIN_RELAY_LOCK, RELAY_LOCK); // HIGH = Relay OFF (Solenoid Locked)
+    writeRelayLevel(RELAY_OFF); // HIGH = Relay OFF (Solenoid Locked)
     lastRelockMs = now;
     Serial.printf("[SOLENOID FSM] -> LOCK_STATE_LOCKED (Relay HIGH/OFF) | %s\n", reason);
-#if HAS_RFID
-    // Re-init RC522 registers in case solenoid de-energize spike disturbed 3.3V bus
-    rfid.PCD_Init();
-    rfid.PCD_AntennaOn();
-#endif
   } else {
-    if (prevState == LOCK_STATE_LOCKED) {
-      digitalWrite(PIN_RELAY_LOCK, RELAY_UNLOCK); // LOW = Relay ON (Solenoid Unlocked)
-#if HAS_RFID
-      rfid.PCD_Init();
-      rfid.PCD_AntennaOn();
-#endif
-    }
+    writeRelayLevel(RELAY_ON);  // LOW = Relay ON (Solenoid Unlocked)
     if (nextState == LOCK_STATE_WAIT_OPEN) {
       Serial.printf("[SOLENOID FSM] -> LOCK_STATE_WAIT_OPEN (Relay LOW/ON) | %s\n", reason);
     } else if (nextState == LOCK_STATE_DOOR_OPEN) {
@@ -1063,6 +1069,7 @@ void firebaseSyncTask(void* parameter) {
   http.setReuse(true);
 
   bool ntpConfigured          = false;
+  bool bootUnlockPurged       = false;
   unsigned long lastFullSync  = 0;
   unsigned long lastCatSync   = 0;
   unsigned long lastHistoryMs = 0;
@@ -1087,6 +1094,15 @@ void firebaseSyncTask(void* parameter) {
     if (!ntpConfigured) {
       configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
       ntpConfigured = true;
+    }
+
+    // 0. Boot Safety Handshake: Proactively clear any stale unlock_cmd=true in RTDB before first read
+    if (!bootUnlockPurged) {
+      if (rtdbRequest(client, http, "PATCH", String("/lockers/") + LOCKER_KEY + "/control",
+                      "{\"unlock_cmd\":false}")) {
+        bootUnlockPurged = true;
+        Serial.println("[BOOT GUARD] Initial RTDB unlock_cmd=false handshake confirmed.");
+      }
     }
 
 #if HAS_RFID
@@ -1226,11 +1242,28 @@ void firebaseSyncTask(void* parameter) {
               alarmAcknowledged = true;
             }
 
-            // Anti Re-Trigger unlock_cmd: ONLY accept when FSM is in LOCK_STATE_LOCKED
-            // and previous unlock_cmd has been confirmed false
-            if (!unlock) {
+            // Boot Lock Guard & Anti Re-Trigger unlock_cmd:
+            // 1. On initial boot sync (!initialRtdbSyncComplete) or inside BOOT_LOCK_GUARD_MS,
+            //    NEVER unlock; purge any stale unlock_cmd=true sitting in Firebase from before boot.
+            // 2. After boot sync is complete, ONLY accept unlock_cmd=true when FSM is in LOCK_STATE_LOCKED
+            //    and previous unlock_cmd has been confirmed false.
+            if (!initialRtdbSyncComplete) {
+              initialRtdbSyncComplete = true;
+              remoteUnlockReq = false;
+              if (unlock) {
+                Serial.println("[BOOT GUARD] Purging stale unlock_cmd=true at startup (Solenoid stays LOCKED)");
+                clearUnlockFlagPending = true;
+                waitUnlockFalseConfirm = true;
+                lastUnlockResetTryMs   = now;
+                if (rtdbRequest(client, http, "PATCH", String("/lockers/") + LOCKER_KEY + "/control",
+                                "{\"unlock_cmd\":false}")) {
+                  clearUnlockFlagPending = false;
+                  waitUnlockFalseConfirm = false;
+                }
+              }
+            } else if (!unlock) {
               waitUnlockFalseConfirm = false;
-            } else if (!emergencyStop) {
+            } else if (!emergencyStop && now >= BOOT_LOCK_GUARD_MS) {
               if (lockState == LOCK_STATE_LOCKED &&
                   !remoteUnlockReq &&
                   !clearUnlockFlagPending &&
@@ -1248,6 +1281,9 @@ void firebaseSyncTask(void* parameter) {
                 // Ignore duplicate unlock_cmd while FSM is active, but ensure RTDB flag is cleared
                 clearUnlockFlagPending = true;
               }
+            } else if (unlock) {
+              // Inside boot guard window or E-STOP -> keep locked and clear RTDB flag
+              clearUnlockFlagPending = true;
             }
 
             saveConfigToNvsIfChanged(newSp, newKp, newKi, newKd, newMode, newMan,
@@ -1321,6 +1357,14 @@ void firebaseSyncTask(void* parameter) {
 // 12. SETUP & REAL-TIME LOCAL CONTROL LOOP (CORE 1)
 // ============================================================================
 void setup() {
+  // 1. IMMEDIATE Safe Relay Boot Init (Active-LOW -> RELAY_OFF / HIGH = Solenoid LOCKED)
+  // MUST execute at microsecond 0 BEFORE Serial.begin() or any delay() so GPIO 26 never glitches LOW
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_OFF);
+  currentRelayLevel = RELAY_OFF;
+  lockState         = LOCK_STATE_LOCKED;
+
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=======================================================");
@@ -1330,10 +1374,6 @@ void setup() {
 
   stateMutex = xSemaphoreCreateMutex();
   memset(tgAlerts, 0, sizeof(tgAlerts));
-
-  // 1. Safe Relay Boot Init (Active-LOW -> HIGH = LOCKED)
-  digitalWrite(PIN_RELAY_LOCK, RELAY_LOCK);
-  pinMode(PIN_RELAY_LOCK, OUTPUT);
 
   // 2. Door Switch & Fan Tachometer
   pinMode(PIN_DOOR_REED, INPUT_PULLUP);
@@ -1468,10 +1508,13 @@ void loop() {
   } else {
     switch (lockState) {
       case LOCK_STATE_LOCKED:
-        if (remoteUnlockReq) {
+        if (remoteUnlockReq && initialRtdbSyncComplete && (now >= BOOT_LOCK_GUARD_MS)) {
           remoteUnlockReq = false;
           authorizedDoorOpenActive = true;
           setLockFsmState(LOCK_STATE_WAIT_OPEN, now, "Unlock command accepted");
+        } else if (remoteUnlockReq && (!initialRtdbSyncComplete || (now < BOOT_LOCK_GUARD_MS))) {
+          // Discard any premature unlock request during boot guard window
+          remoteUnlockReq = false;
         }
         break;
 

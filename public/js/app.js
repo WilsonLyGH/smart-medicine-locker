@@ -50,7 +50,8 @@ const db = isFirebaseConfigured ? getDatabase(firebaseApp) : null;
 const STORAGE_AUTH_KEY = "scada_local_session";
 const LEGACY_AUTH_KEYS = ["scada_auth_user_v2", "scada_auth_user"];
 const STORAGE_INTERLOCK_KEY = "scada_pending_inventory_interlock_v2";
-const HEARTBEAT_TIMEOUT_MS = 10000;
+const HEARTBEAT_TIMEOUT_MS = 12000;
+const LOGIN_ONLINE_GRACE_MS = 10000;
 const DOOR_OPEN_ALARM_MS = 30000;
 const FAN_FAULT_DELAY_MS = 5000;
 const INTERLOCK_WARN_SECONDS = 15;
@@ -158,9 +159,9 @@ const state = {
     locker_3: structuredClone(DEFAULT_SPEC_DATA.lockers.locker_3)
   },
   runtime: {
-    locker_1: { lastHbVal: null, lastHbTime: 0, prevDoorOpen: null, doorOpenedAt: null, doorClosedAt: 0, authorizedOpenSession: false, forcedEntryTimer: null, fanZeroSince: null, lastAuthorizedUnlockAt: 0 },
-    locker_2: { lastHbVal: null, lastHbTime: 0, prevDoorOpen: null, doorOpenedAt: null, doorClosedAt: 0, authorizedOpenSession: false, forcedEntryTimer: null, fanZeroSince: null, lastAuthorizedUnlockAt: 0 },
-    locker_3: { lastHbVal: null, lastHbTime: 0, prevDoorOpen: null, doorOpenedAt: null, doorClosedAt: 0, authorizedOpenSession: false, forcedEntryTimer: null, fanZeroSince: null, lastAuthorizedUnlockAt: 0 }
+    locker_1: { prevSignature: null, lastSeenLocal: 0, loginGraceUntil: 0, hasLiveUpdate: false, lastHbVal: null, lastHbTime: 0, prevDoorOpen: null, doorOpenedAt: null, doorClosedAt: 0, authorizedOpenSession: false, forcedEntryTimer: null, fanZeroSince: null, lastAuthorizedUnlockAt: 0 },
+    locker_2: { prevSignature: null, lastSeenLocal: 0, loginGraceUntil: 0, hasLiveUpdate: false, lastHbVal: null, lastHbTime: 0, prevDoorOpen: null, doorOpenedAt: null, doorClosedAt: 0, authorizedOpenSession: false, forcedEntryTimer: null, fanZeroSince: null, lastAuthorizedUnlockAt: 0 },
+    locker_3: { prevSignature: null, lastSeenLocal: 0, loginGraceUntil: 0, hasLiveUpdate: false, lastHbVal: null, lastHbTime: 0, prevDoorOpen: null, doorOpenedAt: null, doorClosedAt: 0, authorizedOpenSession: false, forcedEntryTimer: null, fanZeroSince: null, lastAuthorizedUnlockAt: 0 }
   },
   awaitingDoorOpen: { locker_1: false, locker_2: false, locker_3: false },
   awaitingDoorTimers: { locker_1: null, locker_2: null, locker_3: null },
@@ -475,7 +476,7 @@ function ref(dbInstance, path = "") {
   return path ? fbRef(dbInstance, path) : fbRef(dbInstance);
 }
 
-function onValue(refObj, callback) {
+function onValue(refObj, callback, cancelCallback) {
   if (isDemoMode) {
     const sub = { path: refObj.path, cb: callback, active: true };
     demoListeners.push(sub);
@@ -487,7 +488,9 @@ function onValue(refObj, callback) {
       if (idx >= 0) demoListeners.splice(idx, 1);
     };
   }
-  return fbOnValue(refObj, callback);
+  return typeof cancelCallback === "function"
+    ? fbOnValue(refObj, callback, cancelCallback)
+    : fbOnValue(refObj, callback);
 }
 
 async function get(refObj) {
@@ -798,12 +801,59 @@ function playAlertBeep(freq = 880, durationMs = 200) {
   } catch (_) {}
 }
 
+function buildLockerTelemetrySignature(val) {
+  if (!val || typeof val !== "object") return "";
+  const m = val.meta || {};
+  const s = val.sensor || {};
+  const p = val.pid || {};
+  return [
+    m.heartbeat ?? "",
+    m.last_seen ?? "",
+    s.uptime_s ?? s.uptime ?? "",
+    s.temp ?? "",
+    s.humidity ?? s.hum ?? "",
+    s.fan_rpm ?? "",
+    s.door_open ?? "",
+    p.output_pwm ?? ""
+  ].join("|");
+}
+
+function resetAllLockerOnlineTracking(graceMs = LOGIN_ONLINE_GRACE_MS) {
+  const now = Date.now();
+  LOCKER_IDS.forEach((id) => {
+    const rt = state.runtime[id];
+    if (!rt) return;
+    rt.prevSignature = null;
+    rt.lastSeenLocal = now;
+    rt.lastHbTime = now;
+    rt.lastHbVal = null;
+    rt.hasLiveUpdate = false;
+    rt.loginGraceUntil = now + graceMs;
+  });
+}
+
 function isLockerOnline(lockerId) {
   const locker = state.lockers[lockerId];
   const rt = state.runtime[lockerId];
-  if (!locker || !locker.meta) return false;
-  if (String(locker.meta.status || "").toLowerCase() !== "online") return false;
-  return Date.now() - rt.lastHbTime <= HEARTBEAT_TIMEOUT_MS;
+  if (!locker || !locker.meta || !rt) return false;
+  if (isDemoMode && demoForcedOffline[lockerId]) return false;
+  if (state.heartbeatSimEnabled) return true;
+
+  const now = Date.now();
+  const metaOnline = String(locker.meta.status || "").toLowerCase() === "online";
+
+  // Once we observe a live payload change in this session, track strictly via local browser clock
+  if (rt.hasLiveUpdate && rt.lastSeenLocal > 0 && now - rt.lastSeenLocal <= HEARTBEAT_TIMEOUT_MS) {
+    return true;
+  }
+
+  // During initial login/attach grace window (10s), keep nodes with status==="online" ONLINE
+  // while waiting for the next 2s ESP32 telemetry delta
+  if (!rt.hasLiveUpdate && now <= (rt.loginGraceUntil || 0) && metaOnline) {
+    return true;
+  }
+
+  return false;
 }
 
 function setRingProgress(circleEl, percent) {
@@ -1387,59 +1437,90 @@ async function ensureAnonymousLoginScreenAuth() {
   } catch (_) {}
 }
 
+let activeLoginResolveUid = null;
+let activeLoginResolvePromise = null;
+let completedFirebaseAuthUid = null;
+
 async function resolveAndCompleteFirebaseLogin(fbUser, announceLogin = true) {
   if (!isFirebaseConfigured || !fbUser || fbUser.isAnonymous) return;
 
-  const email = String(fbUser.email || "").trim().toLowerCase();
-  const usernameFromEmail = email.includes("@") ? email.split("@")[0] : email;
-
-  // Special case: public@locker.local -> forced monitoring (read-only) without reading /system/telegram
-  const isPublicEmail = email === "public@locker.local" || usernameFromEmail === "public";
-
-  let usersMap = {};
-  try {
-    const snap = await get(ref(db, "users"));
-    usersMap = snap.val() || {};
-    state.users = usersMap;
-  } catch (_) {
-    usersMap = state.users || {};
+  // Deduplicate concurrent calls from signInWithEmailAndPassword + onAuthStateChanged
+  if (activeLoginResolveUid === fbUser.uid && activeLoginResolvePromise) {
+    return activeLoginResolvePromise;
   }
 
-  const matchedEntry = Object.entries(usersMap).find(
-    ([, u]) => String(u?.username || "").trim().toLowerCase() === usernameFromEmail
-  );
+  const shouldAnnounce = announceLogin && completedFirebaseAuthUid !== fbUser.uid;
+  activeLoginResolveUid = fbUser.uid;
 
-  if (matchedEntry && matchedEntry[1]?.active === false) {
-    clearSession();
-    await signOut(auth).catch(() => {});
-    playAlertBeep(360, 300);
-    el.loginAlert.textContent = "Access Denied: Account is disabled.";
-    el.loginAlert.classList.remove("hidden");
-    return;
-  }
+  activeLoginResolvePromise = (async () => {
+    try {
+      // Ensure Firebase Auth JWT token is fully ready before attaching authenticated RTDB listeners
+      await fbUser.getIdToken();
+    } catch (_) {}
 
-  const profileKey = matchedEntry ? matchedEntry[0] : isPublicEmail ? "USER_PUBLIC" : fbUser.uid;
-  const rawRec = matchedEntry ? matchedEntry[1] : null;
-  const resolvedRole = isPublicEmail
-    ? "monitoring"
-    : String(rawRec?.role || "operator").trim().toLowerCase();
+    // Rebind all /lockers, /medicine_catalog, /history, /logs listeners cleanly under the new user session
+    attachRtdbListeners(completedFirebaseAuthUid !== fbUser.uid);
 
-  const resolvedUserRec = {
-    name: rawRec?.name || (isPublicEmail ? "Public Monitoring" : usernameFromEmail),
-    username: rawRec?.username || usernameFromEmail,
-    role: resolvedRole,
-    rfid_uid: rawRec?.rfid_uid || "",
-    active: true,
-    allowed_lockers:
-      isPublicEmail || resolvedRole === "monitoring"
-        ? { locker_1: false, locker_2: false, locker_3: false }
-        : resolvedRole === "admin"
-          ? { locker_1: true, locker_2: true, locker_3: true }
-          : rawRec?.allowed_lockers || { locker_1: true, locker_2: true, locker_3: true }
-  };
+    const email = String(fbUser.email || "").trim().toLowerCase();
+    const usernameFromEmail = email.includes("@") ? email.split("@")[0] : email;
 
-  attachProtectedUserListeners(resolvedRole === "admin" && !isPublicEmail);
-  loginWithUser(profileKey, resolvedUserRec, announceLogin);
+    // Special case: public@locker.local -> forced monitoring (read-only) without reading /system/telegram
+    const isPublicEmail = email === "public@locker.local" || usernameFromEmail === "public";
+
+    let usersMap = {};
+    try {
+      const snap = await get(ref(db, "users"));
+      usersMap = snap.val() || {};
+      state.users = usersMap;
+    } catch (_) {
+      usersMap = state.users || {};
+    }
+
+    const matchedEntry = Object.entries(usersMap).find(
+      ([, u]) => String(u?.username || "").trim().toLowerCase() === usernameFromEmail
+    );
+
+    if (matchedEntry && matchedEntry[1]?.active === false) {
+      completedFirebaseAuthUid = null;
+      clearSession();
+      detachProtectedUserListeners();
+      detachBaseRtdbListeners();
+      await signOut(auth).catch(() => {});
+      playAlertBeep(360, 300);
+      el.loginAlert.textContent = "Access Denied: Account is disabled.";
+      el.loginAlert.classList.remove("hidden");
+      return;
+    }
+
+    const profileKey = matchedEntry ? matchedEntry[0] : isPublicEmail ? "USER_PUBLIC" : fbUser.uid;
+    const rawRec = matchedEntry ? matchedEntry[1] : null;
+    const resolvedRole = isPublicEmail
+      ? "monitoring"
+      : String(rawRec?.role || "operator").trim().toLowerCase();
+
+    const resolvedUserRec = {
+      name: rawRec?.name || (isPublicEmail ? "Public Monitoring" : usernameFromEmail),
+      username: rawRec?.username || usernameFromEmail,
+      role: resolvedRole,
+      rfid_uid: rawRec?.rfid_uid || "",
+      active: true,
+      allowed_lockers:
+        isPublicEmail || resolvedRole === "monitoring"
+          ? { locker_1: false, locker_2: false, locker_3: false }
+          : resolvedRole === "admin"
+            ? { locker_1: true, locker_2: true, locker_3: true }
+            : rawRec?.allowed_lockers || { locker_1: true, locker_2: true, locker_3: true }
+    };
+
+    completedFirebaseAuthUid = fbUser.uid;
+    attachProtectedUserListeners(resolvedRole === "admin" && !isPublicEmail);
+    loginWithUser(profileKey, resolvedUserRec, shouldAnnounce);
+  })().finally(() => {
+    activeLoginResolveUid = null;
+    activeLoginResolvePromise = null;
+  });
+
+  return activeLoginResolvePromise;
 }
 
 async function handleRfidUidLoginAttempt(uid) {
@@ -1477,12 +1558,16 @@ async function handleRfidUidLoginAttempt(uid) {
       return;
     }
 
+    // Detach anonymous login-screen listeners cleanly BEFORE switching Firebase Auth user
+    detachRfidLoginListener();
+    detachBaseRtdbListeners();
     const userCred = await signInWithEmailAndPassword(auth, String(cred.email).trim(), String(cred.password));
     // Now authenticated as non-anonymous user -> mark rfid_scan processed
     await update(ref(db, "auth/rfid_scan"), { processed: true }).catch(() => {});
     playAlertBeep(1040, 150);
     await resolveAndCompleteFirebaseLogin(userCred.user, true);
   } catch (_) {
+    if (auth?.currentUser) attachRtdbListeners(true);
     playAlertBeep(360, 350);
     el.loginAlert.textContent = `Access Denied: RFID Auth Failed (${cleanUid})`;
     el.loginAlert.classList.remove("hidden");
@@ -2738,7 +2823,8 @@ function renderDashboardLockers() {
       ? "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-mono-tabular font-bold text-emerald-700"
       : "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-red-50 border border-red-200 text-[10px] font-mono-tabular font-bold text-red-700";
 
-    const hbSec = Math.max(0, Math.floor((Date.now() - rt.lastHbTime) / 1000));
+    const lastSeenBase = rt.lastSeenLocal > 0 ? rt.lastSeenLocal : Date.now();
+    const hbSec = Math.max(0, Math.floor((Date.now() - lastSeenBase) / 1000));
     document.getElementById(`${id}-hb-text`).textContent = `${hbSec}s`;
 
     const doorBadge = document.getElementById(`${id}-door-badge`);
@@ -3538,11 +3624,42 @@ function exportComplianceReportXlsx() {
 }
 
 // ============================================================================
-// Firebase Realtime Database Listeners (Role & Rule-Aware)
+// Firebase Realtime Database Listeners (Role & Auth-Transition Safe)
 // ============================================================================
-let publicRtdbListenersAttached = false;
+let connectedRtdbUnsubscribe = null;
+let baseRtdbUnsubscribes = [];
+let activeRtdbAuthUid = null;
+let listenerRecoveryTimer = null;
 let usersRtdbUnsubscribe = null;
 let telegramRtdbUnsubscribe = null;
+
+function detachBaseRtdbListeners() {
+  if (listenerRecoveryTimer) {
+    clearTimeout(listenerRecoveryTimer);
+    listenerRecoveryTimer = null;
+  }
+  while (baseRtdbUnsubscribes.length > 0) {
+    const unsub = baseRtdbUnsubscribes.pop();
+    if (typeof unsub === "function") {
+      try {
+        unsub();
+      } catch (_) {}
+    }
+  }
+  activeRtdbAuthUid = null;
+}
+
+function scheduleRtdbListenerRecovery() {
+  if (isDemoMode || !isFirebaseConfigured || listenerRecoveryTimer) return;
+  listenerRecoveryTimer = setTimeout(async () => {
+    listenerRecoveryTimer = null;
+    if (!auth?.currentUser) return;
+    try {
+      await auth.currentUser.getIdToken();
+    } catch (_) {}
+    attachRtdbListeners(true);
+  }, 800);
+}
 
 function detachProtectedUserListeners() {
   if (typeof usersRtdbUnsubscribe === "function") {
@@ -3641,153 +3758,236 @@ function attachProtectedUserListeners(canReadTelegram = false) {
   }
 }
 
-function attachRtdbListeners() {
+function attachRtdbListeners(forceRebind = false) {
   if (!isFirebaseConfigured && !isDemoMode) return;
-  if (publicRtdbListenersAttached) return;
-  publicRtdbListenersAttached = true;
 
-  onValue(ref(db, ".info/connected"), (snap) => renderConnectionStatus(snap.val() === true));
+  if (typeof connectedRtdbUnsubscribe !== "function") {
+    connectedRtdbUnsubscribe = onValue(ref(db, ".info/connected"), (snap) => renderConnectionStatus(snap.val() === true));
+  }
 
-  onValue(ref(db, "auth/enroll_until"), (snap) => {
-    state.authEnrollUntil = Number(snap.val() || 0);
-  });
+  const targetAuthUid = isDemoMode ? "DEMO_SESSION" : auth?.currentUser?.uid || null;
+  if (!targetAuthUid) {
+    detachBaseRtdbListeners();
+    return;
+  }
 
-  onValue(ref(db, "system/emergency_stop"), (snap) => {
-    state.system.emergency_stop = Boolean(snap.val());
-    renderDashboardLockers();
-  });
+  if (!forceRebind && activeRtdbAuthUid === targetAuthUid && baseRtdbUnsubscribes.length > 0) {
+    return;
+  }
 
-  onValue(ref(db, "system/global_alarm"), (snap) => {
-    state.system.global_alarm = Boolean(snap.val());
-    renderDashboardLockers();
-  });
+  // Unsubscribe (off) any previous session/anonymous listeners cleanly before subscribing under new auth UID
+  detachBaseRtdbListeners();
+  resetAllLockerOnlineTracking(LOGIN_ONLINE_GRACE_MS);
+  activeRtdbAuthUid = targetAuthUid;
+
+  const onListenerCancel = () => {
+    if (auth?.currentUser && activeRtdbAuthUid === auth.currentUser.uid) {
+      scheduleRtdbListenerRecovery();
+    }
+  };
+
+  baseRtdbUnsubscribes.push(
+    onValue(
+      ref(db, "auth/enroll_until"),
+      (snap) => {
+        state.authEnrollUntil = Number(snap.val() || 0);
+      },
+      onListenerCancel
+    )
+  );
+
+  baseRtdbUnsubscribes.push(
+    onValue(
+      ref(db, "system/emergency_stop"),
+      (snap) => {
+        state.system.emergency_stop = Boolean(snap.val());
+        renderDashboardLockers();
+      },
+      onListenerCancel
+    )
+  );
+
+  baseRtdbUnsubscribes.push(
+    onValue(
+      ref(db, "system/global_alarm"),
+      (snap) => {
+        state.system.global_alarm = Boolean(snap.val());
+        renderDashboardLockers();
+      },
+      onListenerCancel
+    )
+  );
 
   if (isDemoMode) {
     attachProtectedUserListeners(true);
   }
 
-  onValue(ref(db, "medicine_catalog"), (snap) => {
-    state.medicineCatalog = snap.val() || {};
-    renderMedicineCatalogAdmin();
-    renderDashboardLockers();
-    if (state.currentView === "reports") renderReportsView();
-  });
+  baseRtdbUnsubscribes.push(
+    onValue(
+      ref(db, "medicine_catalog"),
+      (snap) => {
+        state.medicineCatalog = snap.val() || {};
+        renderMedicineCatalogAdmin();
+        renderDashboardLockers();
+        if (state.currentView === "reports") renderReportsView();
+      },
+      onListenerCancel
+    )
+  );
 
   LOCKER_IDS.forEach((id) => {
-    onValue(ref(db, `lockers/${id}`), (snap) => {
-      const val = snap.val();
-      if (!val) return;
+    baseRtdbUnsubscribes.push(
+      onValue(
+        ref(db, `lockers/${id}`),
+        (snap) => {
+          const val = snap.val();
+          if (!val) return;
 
-      const rt = state.runtime[id];
-      const incomingHb = val.meta?.heartbeat;
-      if (incomingHb !== undefined) {
-        if (rt.lastHbVal === null) {
-          rt.lastHbVal = incomingHb;
-          rt.lastHbTime = Date.now() - (HEARTBEAT_TIMEOUT_MS - 6000);
-        } else if (incomingHb !== rt.lastHbVal) {
-          rt.lastHbVal = incomingHb;
-          rt.lastHbTime = Date.now();
-        }
-      }
+          const now = Date.now();
+          const rt = state.runtime[id];
+          const sig = buildLockerTelemetrySignature(val);
 
-      if (Boolean(val.control?.unlock_cmd)) {
-        rt.lastAuthorizedUnlockAt = Date.now();
-        rt.authorizedOpenSession = true;
-      }
+          if (rt.prevSignature === null) {
+            // Initial snapshot after login / listener attach: record baseline signature & apply 10s grace
+            rt.prevSignature = sig;
+            rt.lastSeenLocal = now;
+            rt.lastHbTime = now;
+            rt.lastHbVal = val.meta?.heartbeat ?? null;
+            if (!rt.loginGraceUntil || rt.loginGraceUntil < now) {
+              rt.loginGraceUntil = now + LOGIN_ONLINE_GRACE_MS;
+            }
+          } else if (sig !== rt.prevSignature) {
+            // Genuine telemetry/heartbeat change from ESP32 -> immediately mark ONLINE via local browser clock
+            rt.prevSignature = sig;
+            rt.lastSeenLocal = now;
+            rt.lastHbTime = now;
+            rt.lastHbVal = val.meta?.heartbeat ?? null;
+            rt.hasLiveUpdate = true;
+            if (!val.meta) val.meta = {};
+            if (!isDemoMode || !demoForcedOffline[id]) {
+              val.meta.status = "online";
+            }
+          }
 
-      const incomingDoor = Boolean(val.sensor?.door_open);
-      const wasDoorOpen = rt.prevDoorOpen;
-      if (incomingDoor && wasDoorOpen === false) {
-        rt.doorOpenedAt = Date.now();
-      } else if (!incomingDoor) {
-        if (wasDoorOpen === true) {
-          rt.doorClosedAt = Date.now();
-        }
-        rt.doorOpenedAt = null;
-        if (rt.forcedEntryTimer) {
-          clearTimeout(rt.forcedEntryTimer);
-          rt.forcedEntryTimer = null;
-        }
-      }
-      rt.prevDoorOpen = incomingDoor;
+          if (Boolean(val.control?.unlock_cmd)) {
+            rt.lastAuthorizedUnlockAt = now;
+            rt.authorizedOpenSession = true;
+          }
 
-      state.lockers[id] = val;
+          const incomingDoor = Boolean(val.sensor?.door_open);
+          const wasDoorOpen = rt.prevDoorOpen;
+          if (incomingDoor && wasDoorOpen === false) {
+            rt.doorOpenedAt = now;
+          } else if (!incomingDoor) {
+            if (wasDoorOpen === true) {
+              rt.doorClosedAt = now;
+            }
+            rt.doorOpenedAt = null;
+            if (rt.forcedEntryTimer) {
+              clearTimeout(rt.forcedEntryTimer);
+              rt.forcedEntryTimer = null;
+            }
+          }
+          rt.prevDoorOpen = incomingDoor;
 
-      // Stage 2 Trigger: ONLY open Mandatory Inventory Modal when armed (awaitingDoorOpen)
-      if (incomingDoor && state.awaitingDoorOpen[id]) {
-        rt.authorizedOpenSession = true;
-        disarmLockerUnlock(id, false);
-        if (state.currentUser && !state.interlock.active) {
-          triggerInventoryInterlock(id, "ARMED_DOOR_OPEN");
-        }
-      } else if (
-        incomingDoor &&
-        wasDoorOpen === false &&
-        !state.awaitingDoorOpen[id] &&
-        !rt.authorizedOpenSession &&
-        !Boolean(val.control?.unlock_cmd) &&
-        !Boolean(val.alarm?.forced_entry) &&
-        Date.now() - rt.lastAuthorizedUnlockAt > UNLOCK_ARMED_TIMEOUT_MS &&
-        Date.now() - rt.doorClosedAt > 2000
-      ) {
-        // Unauthorized door open outside authorized session & 2s post-close grace:
-        // Confirm door stays open >= 500ms continuously before triggering FORCED ENTRY
-        if (rt.forcedEntryTimer) clearTimeout(rt.forcedEntryTimer);
-        rt.forcedEntryTimer = setTimeout(() => {
-          rt.forcedEntryTimer = null;
-          if (
-            Boolean(state.lockers[id]?.sensor?.door_open) &&
+          state.lockers[id] = val;
+
+          // Stage 2 Trigger: ONLY open Mandatory Inventory Modal when armed (awaitingDoorOpen)
+          if (incomingDoor && state.awaitingDoorOpen[id]) {
+            rt.authorizedOpenSession = true;
+            disarmLockerUnlock(id, false);
+            if (state.currentUser && !state.interlock.active) {
+              triggerInventoryInterlock(id, "ARMED_DOOR_OPEN");
+            }
+          } else if (
+            incomingDoor &&
+            wasDoorOpen === false &&
             !state.awaitingDoorOpen[id] &&
             !rt.authorizedOpenSession &&
-            !Boolean(state.lockers[id]?.alarm?.forced_entry)
+            !Boolean(val.control?.unlock_cmd) &&
+            !Boolean(val.alarm?.forced_entry) &&
+            now - rt.lastAuthorizedUnlockAt > UNLOCK_ARMED_TIMEOUT_MS &&
+            now - rt.doorClosedAt > 2000
           ) {
-            triggerForcedEntryAlarm(id);
+            // Unauthorized door open outside authorized session & 2s post-close grace:
+            // Confirm door stays open >= 500ms continuously before triggering FORCED ENTRY
+            if (rt.forcedEntryTimer) clearTimeout(rt.forcedEntryTimer);
+            rt.forcedEntryTimer = setTimeout(() => {
+              rt.forcedEntryTimer = null;
+              if (
+                Boolean(state.lockers[id]?.sensor?.door_open) &&
+                !state.awaitingDoorOpen[id] &&
+                !rt.authorizedOpenSession &&
+                !Boolean(state.lockers[id]?.alarm?.forced_entry)
+              ) {
+                triggerForcedEntryAlarm(id);
+              }
+            }, 500);
           }
-        }, 500);
-      }
 
-      // Clear authorizedOpenSession only after door is closed and 2s grace has passed
-      if (!incomingDoor && rt.authorizedOpenSession) {
-        setTimeout(() => {
-          if (!Boolean(state.lockers[id]?.sensor?.door_open) && Date.now() - rt.lastAuthorizedUnlockAt > 2000) {
-            rt.authorizedOpenSession = false;
+          // Clear authorizedOpenSession only after door is closed and 2s grace has passed
+          if (!incomingDoor && rt.authorizedOpenSession) {
+            setTimeout(() => {
+              if (!Boolean(state.lockers[id]?.sensor?.door_open) && Date.now() - rt.lastAuthorizedUnlockAt > 2000) {
+                rt.authorizedOpenSession = false;
+              }
+            }, 2200);
           }
-        }, 2200);
-      }
 
-      recordPidSample(id);
-      evaluateLockerAlarms(id);
-      renderDashboardLockers();
+          recordPidSample(id);
+          evaluateLockerAlarms(id);
+          renderDashboardLockers();
 
-      if (state.currentView === "admin" && state.selectedPidLocker === id) {
-        populatePidFormForSelectedLocker(false);
-        updatePidChartView();
-      }
-      if (state.currentView === "reports") {
-        renderReportsView();
-      }
-    });
+          if (state.currentView === "admin" && state.selectedPidLocker === id) {
+            populatePidFormForSelectedLocker(false);
+            updatePidChartView();
+          }
+          if (state.currentView === "reports") {
+            renderReportsView();
+          }
+        },
+        onListenerCancel
+      )
+    );
 
     // Historical Logging Listener (/history/locker_X)
-    onValue(ref(db, `history/${id}`), (snap) => {
-      state.history[id] = snap.val() || {};
-      if (state.currentView === "reports") {
-        renderReportsView();
-      }
-    });
+    baseRtdbUnsubscribes.push(
+      onValue(
+        ref(db, `history/${id}`),
+        (snap) => {
+          state.history[id] = snap.val() || {};
+          if (state.currentView === "reports") {
+            renderReportsView();
+          }
+        },
+        onListenerCancel
+      )
+    );
   });
 
-  onValue(ref(db, "logs/transactions"), (snap) => {
-    const val = snap.val() || {};
-    state.transactions = Object.values(val).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    renderTransactionsTable();
-  });
+  baseRtdbUnsubscribes.push(
+    onValue(
+      ref(db, "logs/transactions"),
+      (snap) => {
+        const val = snap.val() || {};
+        state.transactions = Object.values(val).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        renderTransactionsTable();
+      },
+      onListenerCancel
+    )
+  );
 
-  onValue(ref(db, "logs/alarms"), (snap) => {
-    const val = snap.val() || {};
-    state.alarmLogs = Object.values(val).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    renderAlarmHistoryTable();
-  });
+  baseRtdbUnsubscribes.push(
+    onValue(
+      ref(db, "logs/alarms"),
+      (snap) => {
+        const val = snap.val() || {};
+        state.alarmLogs = Object.values(val).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        renderAlarmHistoryTable();
+      },
+      onListenerCancel
+    )
+  );
 }
 
 // ============================================================================
@@ -3821,10 +4021,14 @@ function bindEvents() {
     const email = rawUser.includes("@") ? rawUser : `${rawUser}@locker.local`;
     el.loginAlert.classList.add("hidden");
     try {
+      // Unsubscribe anonymous login-screen listeners cleanly BEFORE switching Firebase Auth user
+      detachRfidLoginListener();
+      detachBaseRtdbListeners();
       const cred = await signInWithEmailAndPassword(auth, email, uPass);
       el.loginPassword.value = "";
       await resolveAndCompleteFirebaseLogin(cred.user, true);
     } catch (_) {
+      if (auth?.currentUser) attachRtdbListeners(true);
       playAlertBeep(360, 300);
       el.loginAlert.textContent = "Access Denied: Invalid credentials.";
       el.loginAlert.classList.remove("hidden");
@@ -3872,9 +4076,11 @@ function bindEvents() {
       showInterlockIgnoredWarning();
       return;
     }
+    completedFirebaseAuthUid = null;
     clearSession();
     if (isFirebaseConfigured && auth) {
       detachProtectedUserListeners();
+      detachBaseRtdbListeners();
       try {
         await signOut(auth);
       } catch (_) {}
@@ -3912,10 +4118,13 @@ function bindEvents() {
       : "px-3.5 py-1.5 rounded-full bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-800 text-xs font-mono-tabular font-bold uppercase transition";
 
     if (state.heartbeatSimEnabled && state.connected) {
-      const nowSec = Math.floor(Date.now() / 1000);
+      const nowMs = Date.now();
+      const nowSec = Math.floor(nowMs / 1000);
       const updates = {};
       LOCKER_IDS.forEach((id) => {
-        state.runtime[id].lastHbTime = Date.now();
+        state.runtime[id].lastSeenLocal = nowMs;
+        state.runtime[id].lastHbTime = nowMs;
+        state.runtime[id].hasLiveUpdate = true;
         updates[`lockers/${id}/meta/status`] = "online";
         updates[`lockers/${id}/meta/heartbeat`] = nowSec;
       });
@@ -4557,14 +4766,23 @@ function bindEvents() {
 
   el.btnSimOfflineNode.addEventListener("click", async () => {
     const id = el.simLockerId.value;
+    state.runtime[id].hasLiveUpdate = false;
+    state.runtime[id].loginGraceUntil = 0;
     await set(ref(db, `lockers/${id}/meta/status`), "offline");
+    renderDashboardLockers();
     sendTelegramAlert(`${id}_offline`, `NODE OFFLINE: ${state.lockers[id]?.meta?.name || id.toUpperCase()}`);
     showToast(`${id.toUpperCase()}: OFFLINE`);
   });
 
   el.btnSimOnlineNode.addEventListener("click", async () => {
     const id = el.simLockerId.value;
-    await update(ref(db, `lockers/${id}/meta`), { status: "online", heartbeat: Math.floor(Date.now() / 1000) });
+    const nowMs = Date.now();
+    state.runtime[id].lastSeenLocal = nowMs;
+    state.runtime[id].lastHbTime = nowMs;
+    state.runtime[id].hasLiveUpdate = true;
+    state.runtime[id].loginGraceUntil = nowMs + LOGIN_ONLINE_GRACE_MS;
+    await update(ref(db, `lockers/${id}/meta`), { status: "online", heartbeat: Math.floor(nowMs / 1000) });
+    renderDashboardLockers();
     showToast(`${id.toUpperCase()}: ONLINE`);
   });
 
@@ -4608,15 +4826,19 @@ function startSystemTimers() {
     el.clock.textContent = nowStr;
     if (el.loginFooterClock) el.loginFooterClock.textContent = formatDateTime();
 
+    const nowMs = Date.now();
     LOCKER_IDS.forEach((id) => {
       evaluateLockerAlarms(id);
       const rt = state.runtime[id];
       const locker = state.lockers[id];
+      const pastGrace = nowMs > (rt.loginGraceUntil || 0);
+      const elapsedSinceSeen = rt.lastSeenLocal > 0 ? nowMs - rt.lastSeenLocal : Infinity;
       if (
         state.connected &&
         !state.heartbeatSimEnabled &&
-        rt.lastHbVal !== null &&
-        Date.now() - rt.lastHbTime > HEARTBEAT_TIMEOUT_MS &&
+        rt.prevSignature !== null &&
+        pastGrace &&
+        elapsedSinceSeen > HEARTBEAT_TIMEOUT_MS &&
         String(locker?.meta?.status || "").toLowerCase() === "online"
       ) {
         locker.meta.status = "offline";
@@ -4632,10 +4854,13 @@ function startSystemTimers() {
   setInterval(async () => {
     if (!state.connected) return;
     if (state.heartbeatSimEnabled) {
-      const nowSec = Math.floor(Date.now() / 1000);
+      const nowMs = Date.now();
+      const nowSec = Math.floor(nowMs / 1000);
       const updates = {};
       LOCKER_IDS.forEach((id) => {
-        state.runtime[id].lastHbTime = Date.now();
+        state.runtime[id].lastSeenLocal = nowMs;
+        state.runtime[id].lastHbTime = nowMs;
+        state.runtime[id].hasLiveUpdate = true;
         updates[`lockers/${id}/meta/status`] = "online";
         updates[`lockers/${id}/meta/heartbeat`] = nowSec;
       });
@@ -4685,7 +4910,9 @@ if (isDemoMode) {
   navigateToView("login");
   onAuthStateChanged(auth, async (fbUser) => {
     if (!fbUser) {
+      completedFirebaseAuthUid = null;
       detachProtectedUserListeners();
+      detachBaseRtdbListeners();
       if (state.currentUser) {
         clearSession();
       }
@@ -4694,20 +4921,23 @@ if (isDemoMode) {
       return;
     }
 
-    // Attach base RTDB listeners once any Firebase Auth token (anonymous or user) is ready
-    attachRtdbListeners();
-
     if (fbUser.isAnonymous) {
+      completedFirebaseAuthUid = null;
       detachProtectedUserListeners();
       if (state.currentUser) {
         clearSession();
       }
+      try {
+        await fbUser.getIdToken();
+      } catch (_) {}
+      attachRtdbListeners();
       navigateToView("login");
       attachRfidLoginListener();
       return;
     }
 
-    // Authenticated non-anonymous user (restored on refresh or just signed in)
+    // Authenticated non-anonymous user (restored on refresh or just signed in):
+    // resolveAndCompleteFirebaseLogin awaits fbUser.getIdToken() and re-attaches listeners cleanly
     const alreadyHadLocalSession = Boolean(state.currentUser);
     await resolveAndCompleteFirebaseLogin(fbUser, !alreadyHadLocalSession);
   });

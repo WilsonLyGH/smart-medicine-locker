@@ -930,11 +930,10 @@ bool rtdbRequest(WiFiClientSecure& client, HTTPClient& http, const char* method,
     return false;
   }
 
-  // Ensure valid idToken before sending RTDB request
+  // Ensure valid idToken before sending RTDB request (50-min refresh + 5s retry cooldown)
   unsigned long nowMs = millis();
   if (firebaseIdToken.length() == 0 || (nowMs - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
-    if (lastAuthAttemptMs == 0 || (nowMs - lastAuthAttemptMs >= AUTH_RETRY_COOLDOWN_MS) ||
-        (nowMs - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
+    if (lastAuthAttemptMs == 0 || (nowMs - lastAuthAttemptMs >= AUTH_RETRY_COOLDOWN_MS)) {
       authenticateFirebaseEsp32();
     }
   }
@@ -1309,10 +1308,9 @@ void firebaseSyncTask(void* parameter) {
       ntpConfigured = true;
     }
 
-    // Periodic 50-minute Firebase Auth idToken refresh (and initial boot sign-in)
+    // Periodic 50-minute Firebase Auth idToken refresh (and initial boot sign-in, 5s retry cooldown)
     if (firebaseIdToken.length() == 0 || (now - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
-      if (lastAuthAttemptMs == 0 || (now - lastAuthAttemptMs >= AUTH_RETRY_COOLDOWN_MS) ||
-          (now - lastAuthTokenMs >= AUTH_TOKEN_REFRESH_MS)) {
+      if (lastAuthAttemptMs == 0 || (now - lastAuthAttemptMs >= AUTH_RETRY_COOLDOWN_MS)) {
         authenticateFirebaseEsp32();
       }
     }
@@ -1543,6 +1541,7 @@ void firebaseSyncTask(void* parameter) {
       sensorDoc["humidity"]  = roundf(currentHum * 10.0f) / 10.0f;
       sensorDoc["door_open"] = (bool)doorOpen;
       sensorDoc["fan_rpm"]   = (int)currentRpm;
+      sensorDoc["uptime_s"]  = (unsigned long)(millis() / 1000UL);
       String sensorBody;
       serializeJson(sensorDoc, sensorBody);
       int sensorHttpCode = 0;

@@ -26,7 +26,7 @@
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js" />
 
   <!-- Clinical Light SCADA HMI Styles -->
-  <link rel="stylesheet" href="./css/hmi.css?v=20261125a" />
+  <link rel="stylesheet" href="./css/hmi.css?v=20261125b" />
 </head>
 <body class="text-slate-900 antialiased selection:bg-teal-500/20 selection:text-teal-900">
 
@@ -1254,9 +1254,9 @@
         </div>
 
         <div class="p-5 space-y-4">
-          <div class="overflow-x-auto hmi-scroll max-h-[200px] border border-[#E2EEF3] rounded-xl">
+          <div id="catalog-table-scroll" class="overflow-x-auto hmi-scroll max-h-[320px] border border-[#E2EEF3] rounded-xl">
             <table class="w-full text-left border-collapse text-xs font-mono-tabular">
-              <thead class="bg-[#F3F8FA] border-b border-[#E2EEF3] text-[10px] uppercase text-slate-500">
+              <thead class="sticky top-0 z-10 bg-[#F3F8FA] border-b border-[#E2EEF3] text-[10px] uppercase text-slate-500">
                 <tr>
                   <th class="py-2 px-3">ID</th>
                   <th class="py-2 px-3">Item</th>
@@ -1753,6 +1753,6 @@
 
   <!-- Optional Local Firebase Config (Ignored by Git; falls back to Interactive Demo Mode on GitHub Pages) -->
   <script src="./js/firebase-config.js" onerror="window.__FIREBASE_CONFIG_MISSING__=true"></script>
-  <script type="module" src="./js/app.js?v=20261125a"></script>
+  <script type="module" src="./js/app.js?v=20261125b"></script>
 </body>
 </html>

@@ -137,6 +137,12 @@ const state = {
   highlightedLocker: null,
   pidFormDirtyLocker: null,
   lastRenderedPid: { lockerId: null, setpoint: null, kp: null, ki: null, kd: null },
+  fanPendingEdit: { locker_1: false, locker_2: false, locker_3: false },
+  fanDraft: {
+    locker_1: { mode: "AUTO", pwm: 0 },
+    locker_2: { mode: "AUTO", pwm: 0 },
+    locker_3: { mode: "AUTO", pwm: 0 }
+  },
   tgFormHydrated: false,
   heartbeatSimEnabled: false,
   system: {
@@ -292,6 +298,7 @@ const el = {
   assignExpiryDate: document.getElementById("assign-expiry-date"),
   assignAutoSetpoint: document.getElementById("assign-auto-setpoint"),
   assignSyncSpLabel: document.getElementById("assign-sync-sp-label"),
+  catalogTableScroll: document.getElementById("catalog-table-scroll"),
   catalogTableBody: document.getElementById("catalog-table-body"),
   formAddMedicine: document.getElementById("form-add-medicine"),
   medNewName: document.getElementById("med-new-name"),
@@ -2502,6 +2509,19 @@ function updatePidChartView() {
   }
 }
 
+function renderFanControlUi(modeStr, pwmVal) {
+  const isManual = String(modeStr || "AUTO").toUpperCase() === "MANUAL";
+  const clampedPwm = Math.min(100, Math.max(0, Math.round(Number(pwmVal) || 0)));
+  el.btnPidModeAuto.className = !isManual
+    ? "px-3 py-1 rounded-full font-bold bg-teal-600 text-white"
+    : "px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700";
+  el.btnPidModeManual.className = isManual
+    ? "px-3 py-1 rounded-full font-bold bg-amber-500 text-white"
+    : "px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700";
+  el.sliderManualPwm.value = String(clampedPwm);
+  el.labelManualPwm.textContent = `${clampedPwm}%`;
+}
+
 function populatePidFormForSelectedLocker(force = false) {
   const id = state.selectedPidLocker;
   const locker = state.lockers[id];
@@ -2517,7 +2537,7 @@ function populatePidFormForSelectedLocker(force = false) {
       : "pid-locker-tab px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700";
   });
 
-  const liveSp = Number(locker.pid?.setpoint ?? 25.0);
+  const liveSp = Number(locker.pid?.setpoint ?? locker.control?.setpoint ?? 25.0);
   const liveKp = Number(locker.pid?.kp ?? 12.0);
   const liveKi = Number(locker.pid?.ki ?? 0.5);
   const liveKd = Number(locker.pid?.kd ?? 2.0);
@@ -2542,17 +2562,17 @@ function populatePidFormForSelectedLocker(force = false) {
   state.pidFormDirtyLocker = id;
   state.lastRenderedPid.lockerId = id;
 
-  const isManual = String(locker.control?.mode || "AUTO").toUpperCase() === "MANUAL";
-  el.btnPidModeAuto.className = !isManual
-    ? "px-3 py-1 rounded-full font-bold bg-teal-600 text-white"
-    : "px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700";
-  el.btnPidModeManual.className = isManual
-    ? "px-3 py-1 rounded-full font-bold bg-amber-500 text-white"
-    : "px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700";
-
-  const manualPwm = Number(locker.control?.manual_pwm ?? 0);
-  el.sliderManualPwm.value = String(manualPwm);
-  el.labelManualPwm.textContent = `${manualPwm}%`;
+  // Fan Control Dirty/Editing Guard:
+  // Do NOT overwrite mode buttons or slider while user is adjusting MANUAL mode/slider before clicking Apply!
+  if (state.fanPendingEdit[id]) {
+    const draft = state.fanDraft[id] || { mode: "MANUAL", pwm: 0 };
+    renderFanControlUi(draft.mode, draft.pwm);
+  } else {
+    const liveMode = String(locker.control?.mode || "AUTO").toUpperCase() === "MANUAL" ? "MANUAL" : "AUTO";
+    const manualPwm = Number(locker.control?.manual_pwm ?? 0);
+    state.fanDraft[id] = { mode: liveMode, pwm: manualPwm };
+    renderFanControlUi(liveMode, manualPwm);
+  }
 }
 
 function updateAssignSetpointPreview() {
@@ -2653,15 +2673,16 @@ function renderDashboardLockers() {
     const medId = locker.meta?.medicine_id || "med_general";
     const medSpec = state.medicineCatalog[medId] || {
       name: locker.meta?.medicine_name || "General Medicine",
-      category: "Standard",
-      max_temp_alarm: 28.0,
-      max_hum_alarm: 70.0,
-      min_stock_alarm: 5
+      category: locker.meta?.category || "Standard",
+      default_setpoint_temp: locker.pid?.setpoint ?? locker.control?.setpoint ?? 25.0,
+      max_temp_alarm: locker.meta?.max_temp_alarm ?? 28.0,
+      max_hum_alarm: locker.meta?.max_hum_alarm ?? 70.0,
+      min_stock_alarm: locker.meta?.min_stock_alarm ?? 5
     };
 
     const temp = Number(locker.sensor?.temp ?? 25.0);
     const hum = Number(locker.sensor?.humidity ?? 55.0);
-    const sp = Number(locker.pid?.setpoint ?? 25.0);
+    const sp = Number(locker.pid?.setpoint ?? locker.control?.setpoint ?? medSpec.default_setpoint_temp ?? 25.0);
     const err = temp - sp;
     const stock = Number(locker.meta?.stock ?? 0);
     const doorOpen = Boolean(locker.sensor?.door_open);
@@ -3064,34 +3085,54 @@ function renderTransactionsTable() {
   el.txLogBody.appendChild(frag);
 }
 
-function renderMedicineCatalogAdmin() {
-  const prevMed = el.assignMedicineId.value;
+function renderMedicineCatalogAdmin(highlightSlug = "") {
+  const prevMed = highlightSlug || el.assignMedicineId.value;
   el.catalogTableBody.textContent = "";
   el.assignMedicineId.textContent = "";
 
+  let highlightedRow = null;
   Object.entries(state.medicineCatalog).forEach(([id, med], idx) => {
+    const spNum = Number(med.default_setpoint_temp ?? med.setpoint ?? med.target_temp ?? 25);
     const opt = document.createElement("option");
     opt.value = id;
-    opt.textContent = `${med.name} (SP: ${Number(med.default_setpoint_temp).toFixed(1)}°C)`;
+    opt.textContent = `${med.name || id} (SP: ${spNum.toFixed(1)}°C)`;
     el.assignMedicineId.appendChild(opt);
 
     const tr = document.createElement("tr");
-    tr.className = idx % 2 === 0 ? "bg-white hover:bg-teal-50/40" : "bg-[#F8FBFD] hover:bg-teal-50/40";
+    const isHighlighted = Boolean(highlightSlug && id === highlightSlug);
+    tr.dataset.medId = id;
+    tr.title = "Click to select this medicine for Assign Locker";
+    tr.className = isHighlighted
+      ? "bg-teal-50 hover:bg-teal-100/70 cursor-pointer transition-colors"
+      : idx % 2 === 0
+        ? "bg-white hover:bg-teal-50/40 cursor-pointer transition-colors"
+        : "bg-[#F8FBFD] hover:bg-teal-50/40 cursor-pointer transition-colors";
     tr.innerHTML = `
       <td class="py-2 px-3 text-slate-400">${id}</td>
       <td class="py-2 px-3 font-bold text-slate-900">${med.name || id}</td>
       <td class="py-2 px-2"><span class="px-2 py-0.5 rounded-full bg-teal-50 border border-teal-200 text-teal-800 text-[10px] font-bold">${med.category || "Room"}</span></td>
-      <td class="py-2 px-2 text-right font-bold text-teal-700">${Number(med.default_setpoint_temp ?? 25).toFixed(1)}°C</td>
+      <td class="py-2 px-2 text-right font-bold text-teal-700">${spNum.toFixed(1)}°C</td>
       <td class="py-2 px-2 text-right font-semibold text-red-600">${Number(med.max_temp_alarm ?? 28).toFixed(1)}°C</td>
       <td class="py-2 px-2 text-right text-sky-700">${Number(med.max_hum_alarm ?? 70).toFixed(0)}%</td>
       <td class="py-2 px-2 text-right font-semibold text-amber-700">${med.min_stock_alarm ?? 5}</td>
     `;
+    tr.addEventListener("click", () => {
+      el.assignMedicineId.value = id;
+      if (el.assignAutoSetpoint) el.assignAutoSetpoint.checked = true;
+      updateAssignSetpointPreview();
+    });
     el.catalogTableBody.appendChild(tr);
+    if (isHighlighted) highlightedRow = tr;
   });
+
   if (prevMed && state.medicineCatalog[prevMed]) {
     el.assignMedicineId.value = prevMed;
   }
   populateAssignLockerFields(Boolean(prevMed && state.medicineCatalog[prevMed]));
+
+  if (highlightedRow) {
+    highlightedRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
 }
 
 function countOtherActiveAdmins(excludeUid) {
@@ -4052,34 +4093,81 @@ function bindEvents() {
   });
 
   el.btnPidModeAuto.addEventListener("click", async () => {
+    if (state.currentUser?.role !== "admin") return;
+    const id = state.selectedPidLocker;
+    const savedPwm = Number(state.lockers[id]?.control?.manual_pwm ?? 0);
+    state.fanDraft[id] = { mode: "AUTO", pwm: savedPwm };
     try {
-      await set(ref(db, `lockers/${state.selectedPidLocker}/control/mode`), "AUTO");
-      showToast(`${state.selectedPidLocker.toUpperCase()} Mode: AUTO`);
+      await set(ref(db, `lockers/${id}/control/mode`), "AUTO");
+      if (state.lockers[id]) {
+        state.lockers[id].control = { ...(state.lockers[id].control || {}), mode: "AUTO" };
+      }
+      state.fanPendingEdit[id] = false;
+      renderFanControlUi("AUTO", savedPwm);
+      renderDashboardLockers();
+      updatePidChartView();
+      showToast(`${id.toUpperCase()} Mode: AUTO`);
     } catch (err) {
       showToast(`Mode Change Failed: ${err?.message || "Permission denied"}`, true);
     }
   });
 
-  el.btnPidModeManual.addEventListener("click", async () => {
-    try {
-      await set(ref(db, `lockers/${state.selectedPidLocker}/control/mode`), "MANUAL");
-      showToast(`${state.selectedPidLocker.toUpperCase()} Mode: MANUAL`);
-    } catch (err) {
-      showToast(`Mode Change Failed: ${err?.message || "Permission denied"}`, true);
-    }
+  el.btnPidModeManual.addEventListener("click", () => {
+    if (state.currentUser?.role !== "admin") return;
+    const id = state.selectedPidLocker;
+    const liveMode = String(state.lockers[id]?.control?.mode || "AUTO").toUpperCase() === "MANUAL" ? "MANUAL" : "AUTO";
+    const livePwm = Number(state.lockers[id]?.control?.manual_pwm ?? 0);
+    const currentSliderPwm = Number(el.sliderManualPwm.value);
+    const nextPwm = state.fanPendingEdit[id] ? currentSliderPwm : livePwm;
+
+    state.fanDraft[id] = { mode: "MANUAL", pwm: nextPwm };
+    // Lock slider & mode UI until user clicks Apply (or reverts to AUTO)
+    state.fanPendingEdit[id] = true;
+    renderFanControlUi("MANUAL", nextPwm);
+    showToast(`${id.toUpperCase()}: Adjust Manual PWM & click Apply`);
   });
 
-  el.sliderManualPwm.addEventListener("input", () => {
-    el.labelManualPwm.textContent = `${el.sliderManualPwm.value}%`;
-  });
-
-  el.btnApplyManualPwm.addEventListener("click", async () => {
+  const beginFanSliderEdit = () => {
+    if (state.currentUser?.role !== "admin") return;
     const id = state.selectedPidLocker;
     const pwm = Number(el.sliderManualPwm.value);
-    const rpm = Math.round((pwm / 100) * 2800);
+    state.fanPendingEdit[id] = true;
+    state.fanDraft[id] = { mode: "MANUAL", pwm };
+    renderFanControlUi("MANUAL", pwm);
+  };
+
+  el.sliderManualPwm.addEventListener("pointerdown", beginFanSliderEdit);
+  el.sliderManualPwm.addEventListener("mousedown", beginFanSliderEdit);
+  el.sliderManualPwm.addEventListener("touchstart", beginFanSliderEdit, { passive: true });
+  el.sliderManualPwm.addEventListener("input", beginFanSliderEdit);
+
+  el.btnApplyManualPwm.addEventListener("click", async () => {
+    if (state.currentUser?.role !== "admin") return;
+    const id = state.selectedPidLocker;
+    const pwm = Math.min(100, Math.max(0, Math.round(Number(el.sliderManualPwm.value) || 0)));
+    const patch = {
+      "control/mode": "MANUAL",
+      "control/manual_pwm": pwm
+    };
+    if (isDemoMode) {
+      patch["sensor/fan_rpm"] = Math.round((pwm / 100) * 2800);
+    }
+
     try {
-      await update(ref(db, `lockers/${id}`), { "control/mode": "MANUAL", "control/manual_pwm": pwm, "sensor/fan_rpm": rpm });
-      showToast(`Manual PWM Applied: ${pwm}%`);
+      await update(ref(db, `lockers/${id}`), patch);
+      if (state.lockers[id]) {
+        state.lockers[id].control = {
+          ...(state.lockers[id].control || {}),
+          mode: "MANUAL",
+          manual_pwm: pwm
+        };
+      }
+      state.fanDraft[id] = { mode: "MANUAL", pwm };
+      state.fanPendingEdit[id] = false;
+      renderFanControlUi("MANUAL", pwm);
+      renderDashboardLockers();
+      updatePidChartView();
+      showToast(`Manual PWM Applied: ${id.toUpperCase()} (${pwm}%)`);
     } catch (err) {
       showToast(`Manual PWM Failed: ${err?.message || "Permission denied"}`, true);
     }
@@ -4087,7 +4175,10 @@ function bindEvents() {
 
   // Admin: Assign Locker (with Batch No & Expiry Date) + Catalog
   el.assignLockerId.addEventListener("change", () => populateAssignLockerFields(false));
-  el.assignMedicineId.addEventListener("change", updateAssignSetpointPreview);
+  el.assignMedicineId.addEventListener("change", () => {
+    if (el.assignAutoSetpoint) el.assignAutoSetpoint.checked = true;
+    updateAssignSetpointPreview();
+  });
 
   el.formAssignMedicine.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -4107,17 +4198,25 @@ function bindEvents() {
 
     const batchNo = el.assignBatchNo.value.trim();
     const expDate = el.assignExpiryDate.value.trim();
-    const defaultSp = Number(med.default_setpoint_temp);
-    const syncSp = Boolean(el.assignAutoSetpoint?.checked) && Number.isFinite(defaultSp);
+    const defaultSp = Number(med.default_setpoint_temp ?? med.setpoint ?? med.target_temp);
+    const maxTemp = Number(med.max_temp_alarm ?? 28.0);
+    const maxHum = Number(med.max_hum_alarm ?? 70.0);
+    const minStock = Number(med.min_stock_alarm ?? 5);
+    const syncSp = (el.assignAutoSetpoint ? el.assignAutoSetpoint.checked : true) && Number.isFinite(defaultSp);
 
     const updates = {
       [`lockers/${lockerId}/meta/medicine_id`]: medId,
       [`lockers/${lockerId}/meta/medicine_name`]: med.name,
+      [`lockers/${lockerId}/meta/category`]: med.category || "Standard",
+      [`lockers/${lockerId}/meta/max_temp_alarm`]: maxTemp,
+      [`lockers/${lockerId}/meta/max_hum_alarm`]: maxHum,
+      [`lockers/${lockerId}/meta/min_stock_alarm`]: minStock,
       [`lockers/${lockerId}/meta/batch_no`]: batchNo,
       [`lockers/${lockerId}/meta/expiry_date`]: expDate
     };
     if (syncSp) {
       updates[`lockers/${lockerId}/pid/setpoint`] = defaultSp;
+      updates[`lockers/${lockerId}/control/setpoint`] = defaultSp;
     }
 
     try {
@@ -4129,12 +4228,20 @@ function bindEvents() {
           ...(state.lockers[lockerId].meta || {}),
           medicine_id: medId,
           medicine_name: med.name,
+          category: med.category || "Standard",
+          max_temp_alarm: maxTemp,
+          max_hum_alarm: maxHum,
+          min_stock_alarm: minStock,
           batch_no: batchNo,
           expiry_date: expDate
         };
         if (syncSp) {
           state.lockers[lockerId].pid = {
             ...(state.lockers[lockerId].pid || {}),
+            setpoint: defaultSp
+          };
+          state.lockers[lockerId].control = {
+            ...(state.lockers[lockerId].control || {}),
             setpoint: defaultSp
           };
         }
@@ -4157,22 +4264,52 @@ function bindEvents() {
 
   el.formAddMedicine.addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (state.currentUser?.role !== "admin") return;
-    const name = el.medNewName.value.trim();
-    const slug = "med_" + name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-    try {
-      await set(ref(db, `medicine_catalog/${slug}`), {
-        name,
-        category: el.medNewCat.value.trim(),
-        default_setpoint_temp: Number(el.medNewSp.value),
-        max_temp_alarm: Number(el.medNewMaxT.value),
-        max_hum_alarm: Number(el.medNewMaxH.value),
-        min_stock_alarm: Number(el.medNewMinS.value)
-      });
-      el.formAddMedicine.reset();
-      showToast(`Added Item: ${name}`);
-    } catch (err) {
+    if (state.currentUser?.role !== "admin") {
       playAlertBeep(440, 260);
+      showToast("Access Denied: Admin only.", true);
+      return;
+    }
+
+    const name = el.medNewName.value.trim();
+    const category = el.medNewCat.value.trim() || "Standard Room";
+    const sp = Number(el.medNewSp.value);
+    const maxT = Number(el.medNewMaxT.value);
+    const maxH = Number(el.medNewMaxH.value);
+    const minS = Math.max(0, Math.round(Number(el.medNewMinS.value) || 0));
+
+    if (!name || !Number.isFinite(sp) || !Number.isFinite(maxT) || !Number.isFinite(maxH)) {
+      playAlertBeep(440, 260);
+      showToast("Invalid medicine parameters.", true);
+      return;
+    }
+
+    const cleanSlugPart = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+    const slug = cleanSlugPart ? `med_${cleanSlugPart}` : `med_item_${Date.now()}`;
+    const newItem = {
+      name,
+      category,
+      default_setpoint_temp: sp,
+      max_temp_alarm: maxT,
+      max_hum_alarm: maxH,
+      min_stock_alarm: minS
+    };
+
+    try {
+      await set(ref(db, `medicine_catalog/${slug}`), newItem);
+      state.medicineCatalog = {
+        ...(state.medicineCatalog || {}),
+        [slug]: newItem
+      };
+      renderMedicineCatalogAdmin(slug);
+      el.assignMedicineId.value = slug;
+      if (el.assignAutoSetpoint) el.assignAutoSetpoint.checked = true;
+      updateAssignSetpointPreview();
+      renderDashboardLockers();
+      el.formAddMedicine.reset();
+      showToast(`Added to Catalog: ${name} (SP: ${sp.toFixed(1)}°C)`);
+    } catch (err) {
+      console.error("Add medicine failed:", err);
+      playAlertBeep(440, 280);
       showToast(`Add Medicine Failed: ${err?.message || "Permission denied"}`, true);
     }
   });

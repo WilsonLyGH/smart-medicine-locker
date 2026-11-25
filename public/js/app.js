@@ -136,6 +136,7 @@ const state = {
   selectedReportLocker: "locker_1",
   highlightedLocker: null,
   pidFormDirtyLocker: null,
+  lastRenderedPid: { lockerId: null, setpoint: null, kp: null, ki: null, kd: null },
   tgFormHydrated: false,
   heartbeatSimEnabled: false,
   system: {
@@ -290,6 +291,7 @@ const el = {
   assignBatchNo: document.getElementById("assign-batch-no"),
   assignExpiryDate: document.getElementById("assign-expiry-date"),
   assignAutoSetpoint: document.getElementById("assign-auto-setpoint"),
+  assignSyncSpLabel: document.getElementById("assign-sync-sp-label"),
   catalogTableBody: document.getElementById("catalog-table-body"),
   formAddMedicine: document.getElementById("form-add-medicine"),
   medNewName: document.getElementById("med-new-name"),
@@ -1650,7 +1652,7 @@ function navigateToView(targetView, focusCatalog = false) {
   } else if (targetView === "admin") {
     renderUsersAdmin();
     populatePidFormForSelectedLocker(true);
-    populateAssignLockerFields();
+    populateAssignLockerFields(false);
     updatePidChartView();
     if (focusCatalog && el.sectionMedicineCatalog) {
       setTimeout(() => el.sectionMedicineCatalog.scrollIntoView({ behavior: "smooth" }), 80);
@@ -2515,13 +2517,30 @@ function populatePidFormForSelectedLocker(force = false) {
       : "pid-locker-tab px-3 py-1 rounded-full font-semibold text-slate-600 hover:text-teal-700";
   });
 
-  if (force || state.pidFormDirtyLocker !== id) {
-    el.inputPidSp.value = Number(locker.pid?.setpoint ?? 25.0).toFixed(1);
-    el.inputPidKp.value = Number(locker.pid?.kp ?? 12.0);
-    el.inputPidKi.value = Number(locker.pid?.ki ?? 0.5);
-    el.inputPidKd.value = Number(locker.pid?.kd ?? 2.0);
-    state.pidFormDirtyLocker = id;
+  const liveSp = Number(locker.pid?.setpoint ?? 25.0);
+  const liveKp = Number(locker.pid?.kp ?? 12.0);
+  const liveKi = Number(locker.pid?.ki ?? 0.5);
+  const liveKd = Number(locker.pid?.kd ?? 2.0);
+  const switchedLocker = force || state.pidFormDirtyLocker !== id || state.lastRenderedPid.lockerId !== id;
+
+  if (switchedLocker || (liveSp !== state.lastRenderedPid.setpoint && document.activeElement !== el.inputPidSp)) {
+    el.inputPidSp.value = liveSp.toFixed(1);
+    state.lastRenderedPid.setpoint = liveSp;
   }
+  if (switchedLocker || (liveKp !== state.lastRenderedPid.kp && document.activeElement !== el.inputPidKp)) {
+    el.inputPidKp.value = liveKp;
+    state.lastRenderedPid.kp = liveKp;
+  }
+  if (switchedLocker || (liveKi !== state.lastRenderedPid.ki && document.activeElement !== el.inputPidKi)) {
+    el.inputPidKi.value = liveKi;
+    state.lastRenderedPid.ki = liveKi;
+  }
+  if (switchedLocker || (liveKd !== state.lastRenderedPid.kd && document.activeElement !== el.inputPidKd)) {
+    el.inputPidKd.value = liveKd;
+    state.lastRenderedPid.kd = liveKd;
+  }
+  state.pidFormDirtyLocker = id;
+  state.lastRenderedPid.lockerId = id;
 
   const isManual = String(locker.control?.mode || "AUTO").toUpperCase() === "MANUAL";
   el.btnPidModeAuto.className = !isManual
@@ -2536,13 +2555,43 @@ function populatePidFormForSelectedLocker(force = false) {
   el.labelManualPwm.textContent = `${manualPwm}%`;
 }
 
-function populateAssignLockerFields() {
+function updateAssignSetpointPreview() {
+  if (!el.assignSyncSpLabel) return;
+  const medId = el.assignMedicineId.value;
+  const med = state.medicineCatalog[medId];
+  const targetSp = Number(med?.default_setpoint_temp);
+  if (Number.isFinite(targetSp)) {
+    el.assignSyncSpLabel.textContent = `Sync Default SP (→ ${targetSp.toFixed(1)}°C)`;
+  } else {
+    el.assignSyncSpLabel.textContent = "Sync Default SP";
+  }
+}
+
+function populateAssignLockerFields(preserveSelection = false) {
   const lockerId = el.assignLockerId.value;
   const locker = state.lockers[lockerId];
-  if (!locker) return;
-  if (locker.meta?.medicine_id) el.assignMedicineId.value = locker.meta.medicine_id;
-  el.assignBatchNo.value = locker.meta?.batch_no || "";
-  el.assignExpiryDate.value = locker.meta?.expiry_date || "";
+  const prevSelectedMed = el.assignMedicineId.value;
+  if (!locker) {
+    updateAssignSetpointPreview();
+    return;
+  }
+
+  if (preserveSelection && prevSelectedMed && state.medicineCatalog[prevSelectedMed]) {
+    el.assignMedicineId.value = prevSelectedMed;
+  } else {
+    const lockerMedId = locker.meta?.medicine_id;
+    if (lockerMedId && state.medicineCatalog[lockerMedId]) {
+      el.assignMedicineId.value = lockerMedId;
+    } else if (el.assignMedicineId.options.length > 0 && !el.assignMedicineId.value) {
+      el.assignMedicineId.selectedIndex = 0;
+    }
+    el.assignBatchNo.value = locker.meta?.batch_no || "";
+    el.assignExpiryDate.value = locker.meta?.expiry_date || "";
+    if (el.assignAutoSetpoint && !preserveSelection) {
+      el.assignAutoSetpoint.checked = true;
+    }
+  }
+  updateAssignSetpointPreview();
 }
 
 function hydrateTelegramForm() {
@@ -3016,6 +3065,7 @@ function renderTransactionsTable() {
 }
 
 function renderMedicineCatalogAdmin() {
+  const prevMed = el.assignMedicineId.value;
   el.catalogTableBody.textContent = "";
   el.assignMedicineId.textContent = "";
 
@@ -3038,7 +3088,10 @@ function renderMedicineCatalogAdmin() {
     `;
     el.catalogTableBody.appendChild(tr);
   });
-  populateAssignLockerFields();
+  if (prevMed && state.medicineCatalog[prevMed]) {
+    el.assignMedicineId.value = prevMed;
+  }
+  populateAssignLockerFields(Boolean(prevMed && state.medicineCatalog[prevMed]));
 }
 
 function countOtherActiveAdmins(excludeUid) {
@@ -3983,18 +4036,37 @@ function bindEvents() {
     const pv = Number(state.lockers[id]?.sensor?.temp ?? sp);
     const computedPwm = Math.min(100, Math.max(0, Math.round(Math.max(0, pv - sp) * kp)));
 
-    await update(ref(db, `lockers/${id}/pid`), { setpoint: sp, kp, ki, kd, output_pwm: computedPwm });
-    showToast(`PID Saved: ${id.toUpperCase()} (SP=${sp}°C)`);
+    try {
+      await update(ref(db, `lockers/${id}/pid`), { setpoint: sp, kp, ki, kd, output_pwm: computedPwm });
+      if (state.lockers[id]) {
+        state.lockers[id].pid = { ...(state.lockers[id].pid || {}), setpoint: sp, kp, ki, kd, output_pwm: computedPwm };
+      }
+      populatePidFormForSelectedLocker(true);
+      updatePidChartView();
+      renderDashboardLockers();
+      showToast(`PID Saved: ${id.toUpperCase()} (SP=${sp.toFixed(1)}°C)`);
+    } catch (err) {
+      playAlertBeep(440, 260);
+      showToast(`PID Save Failed: ${err?.message || "Permission denied"}`, true);
+    }
   });
 
   el.btnPidModeAuto.addEventListener("click", async () => {
-    await set(ref(db, `lockers/${state.selectedPidLocker}/control/mode`), "AUTO");
-    showToast(`${state.selectedPidLocker.toUpperCase()} Mode: AUTO`);
+    try {
+      await set(ref(db, `lockers/${state.selectedPidLocker}/control/mode`), "AUTO");
+      showToast(`${state.selectedPidLocker.toUpperCase()} Mode: AUTO`);
+    } catch (err) {
+      showToast(`Mode Change Failed: ${err?.message || "Permission denied"}`, true);
+    }
   });
 
   el.btnPidModeManual.addEventListener("click", async () => {
-    await set(ref(db, `lockers/${state.selectedPidLocker}/control/mode`), "MANUAL");
-    showToast(`${state.selectedPidLocker.toUpperCase()} Mode: MANUAL`);
+    try {
+      await set(ref(db, `lockers/${state.selectedPidLocker}/control/mode`), "MANUAL");
+      showToast(`${state.selectedPidLocker.toUpperCase()} Mode: MANUAL`);
+    } catch (err) {
+      showToast(`Mode Change Failed: ${err?.message || "Permission denied"}`, true);
+    }
   });
 
   el.sliderManualPwm.addEventListener("input", () => {
@@ -4005,49 +4077,104 @@ function bindEvents() {
     const id = state.selectedPidLocker;
     const pwm = Number(el.sliderManualPwm.value);
     const rpm = Math.round((pwm / 100) * 2800);
-    await update(ref(db, `lockers/${id}`), { "control/mode": "MANUAL", "control/manual_pwm": pwm, "sensor/fan_rpm": rpm });
-    showToast(`Manual PWM Applied: ${pwm}%`);
+    try {
+      await update(ref(db, `lockers/${id}`), { "control/mode": "MANUAL", "control/manual_pwm": pwm, "sensor/fan_rpm": rpm });
+      showToast(`Manual PWM Applied: ${pwm}%`);
+    } catch (err) {
+      showToast(`Manual PWM Failed: ${err?.message || "Permission denied"}`, true);
+    }
   });
 
   // Admin: Assign Locker (with Batch No & Expiry Date) + Catalog
-  el.assignLockerId.addEventListener("change", populateAssignLockerFields);
+  el.assignLockerId.addEventListener("change", () => populateAssignLockerFields(false));
+  el.assignMedicineId.addEventListener("change", updateAssignSetpointPreview);
 
   el.formAssignMedicine.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.currentUser?.role !== "admin") {
+      playAlertBeep(440, 260);
+      showToast("Access Denied: Admin only.", true);
+      return;
+    }
+
     const lockerId = el.assignLockerId.value;
     const medId = el.assignMedicineId.value;
     const med = state.medicineCatalog[medId];
-    if (!med) return;
+    if (!med) {
+      showToast("Please select a valid medicine.", true);
+      return;
+    }
 
     const batchNo = el.assignBatchNo.value.trim();
     const expDate = el.assignExpiryDate.value.trim();
+    const defaultSp = Number(med.default_setpoint_temp);
+    const syncSp = Boolean(el.assignAutoSetpoint?.checked) && Number.isFinite(defaultSp);
+
     const updates = {
       [`lockers/${lockerId}/meta/medicine_id`]: medId,
       [`lockers/${lockerId}/meta/medicine_name`]: med.name,
       [`lockers/${lockerId}/meta/batch_no`]: batchNo,
       [`lockers/${lockerId}/meta/expiry_date`]: expDate
     };
-    if (el.assignAutoSetpoint.checked) {
-      updates[`lockers/${lockerId}/pid/setpoint`] = Number(med.default_setpoint_temp);
+    if (syncSp) {
+      updates[`lockers/${lockerId}/pid/setpoint`] = defaultSp;
     }
-    await update(ref(db), updates);
-    showToast(`Assigned: ${med.name} -> ${lockerId.toUpperCase()}`);
+
+    try {
+      await update(ref(db), updates);
+
+      // Update local state immediately so Overview, PID Tuning & Charts reflect new SP without delay
+      if (state.lockers[lockerId]) {
+        state.lockers[lockerId].meta = {
+          ...(state.lockers[lockerId].meta || {}),
+          medicine_id: medId,
+          medicine_name: med.name,
+          batch_no: batchNo,
+          expiry_date: expDate
+        };
+        if (syncSp) {
+          state.lockers[lockerId].pid = {
+            ...(state.lockers[lockerId].pid || {}),
+            setpoint: defaultSp
+          };
+        }
+      }
+      renderDashboardLockers();
+      if (state.selectedPidLocker === lockerId) {
+        if (syncSp) populatePidFormForSelectedLocker(true);
+        updatePidChartView();
+      }
+      updateAssignSetpointPreview();
+
+      const spSuffix = syncSp ? ` (SP: ${defaultSp.toFixed(1)}°C)` : "";
+      showToast(`Assigned: ${med.name} -> ${lockerId.toUpperCase()}${spSuffix}`);
+    } catch (err) {
+      console.error("Assign locker update failed:", err);
+      playAlertBeep(440, 280);
+      showToast(`Assign Failed: ${err?.message || "Permission denied"}`, true);
+    }
   });
 
   el.formAddMedicine.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.currentUser?.role !== "admin") return;
     const name = el.medNewName.value.trim();
     const slug = "med_" + name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-    await set(ref(db, `medicine_catalog/${slug}`), {
-      name,
-      category: el.medNewCat.value.trim(),
-      default_setpoint_temp: Number(el.medNewSp.value),
-      max_temp_alarm: Number(el.medNewMaxT.value),
-      max_hum_alarm: Number(el.medNewMaxH.value),
-      min_stock_alarm: Number(el.medNewMinS.value)
-    });
-    el.formAddMedicine.reset();
-    showToast(`Added Item: ${name}`);
+    try {
+      await set(ref(db, `medicine_catalog/${slug}`), {
+        name,
+        category: el.medNewCat.value.trim(),
+        default_setpoint_temp: Number(el.medNewSp.value),
+        max_temp_alarm: Number(el.medNewMaxT.value),
+        max_hum_alarm: Number(el.medNewMaxH.value),
+        min_stock_alarm: Number(el.medNewMinS.value)
+      });
+      el.formAddMedicine.reset();
+      showToast(`Added Item: ${name}`);
+    } catch (err) {
+      playAlertBeep(440, 260);
+      showToast(`Add Medicine Failed: ${err?.message || "Permission denied"}`, true);
+    }
   });
 
   // Admin: Add RFID User (with Per-Locker RBAC & RFID Scan-to-Fill)

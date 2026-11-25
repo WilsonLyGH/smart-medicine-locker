@@ -26,7 +26,7 @@
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js" />
 
   <!-- Clinical Light SCADA HMI Styles -->
-  <link rel="stylesheet" href="./css/hmi.css" />
+  <link rel="stylesheet" href="./css/hmi.css?v=20261125a" />
 </head>
 <body class="text-slate-900 antialiased selection:bg-teal-500/20 selection:text-teal-900">
 
@@ -1194,7 +1194,7 @@
             Assign Locker
           </h3>
         </div>
-        <form id="form-assign-medicine" class="p-5 space-y-3.5">
+        <form id="form-assign-medicine" autocomplete="off" class="p-5 space-y-3.5">
           <div>
             <label for="assign-locker-id" class="block text-[11px] font-mono-tabular font-bold uppercase text-slate-600 mb-1">Locker</label>
             <select
@@ -1234,7 +1234,7 @@
           </div>
           <label class="flex items-center gap-2 text-xs font-mono-tabular text-slate-700 cursor-pointer">
             <input id="assign-auto-setpoint" type="checkbox" checked class="rounded accent-teal-600 w-4 h-4" />
-            <span>Sync Default SP</span>
+            <span id="assign-sync-sp-label">Sync Default SP</span>
           </label>
           <button
             type="submit"
@@ -1753,6 +1753,6 @@
 
   <!-- Optional Local Firebase Config (Ignored by Git; falls back to Interactive Demo Mode on GitHub Pages) -->
   <script src="./js/firebase-config.js" onerror="window.__FIREBASE_CONFIG_MISSING__=true"></script>
-  <script type="module" src="./js/app.js"></script>
+  <script type="module" src="./js/app.js?v=20261125a"></script>
 </body>
 </html>
